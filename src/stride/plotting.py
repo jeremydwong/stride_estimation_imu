@@ -7,11 +7,12 @@ def plt_ltrl_frwd_strides(strides: Dict[str, Any]):
     ltrl = strides['ltrl']
     frwd = strides['frwd']
     n = ltrl.shape[0]
-    colors = plt.cm.jet(np.linspace(0, 1, n))
+    colors = plt.cm.jet(np.linspace(0, 1, ltrl.shape[1]))
     plt.figure()
-    for i in range(n):
-        plt.plot(ltrl[i, :], frwd[i, :], color=colors[i])
-        plt.plot(ltrl[i, -1], frwd[i, -1], 'ko', markerfacecolor='k', markersize=5)
+    for i in range(ltrl.shape[1]):
+        plt.plot(ltrl[:,i], frwd[:,i], color=colors[i])
+        
+    plt.scatter(ltrl[-1,:], frwd[-1,:], s=20,marker='o')
     plt.grid(True)
     plt.ylabel('Frwd [m]')
     plt.xlabel('Ltrl [m]')
@@ -21,11 +22,11 @@ def plt_frwd_elev_strides(strides: Dict[str, Any]):
     """Plot forward vs elevation strides."""
     frwd = strides['frwd']
     elev = strides['elev']
-    n = frwd.shape[0]
+    n = frwd.shape[1]
     colors = plt.cm.jet(np.linspace(0, 1, n))
     plt.figure()
     for i in range(n):
-        elev_i = elev[i, :]
+        elev_i = elev[:,i]
         delev = np.diff(elev_i)
         NN = np.where(delev != 0)[0]
         if NN.size > 0:
@@ -33,9 +34,9 @@ def plt_frwd_elev_strides(strides: Dict[str, Any]):
             elev_i = elev_i[:NN]
             err = elev_i[-1]
             elev_i = elev_i - np.linspace(0, err, NN)
-            elev_i = np.pad(elev_i, (0, frwd.shape[1] - NN), 'constant')
+            elev_i = np.pad(elev_i, (0, frwd.shape[0] - NN), 'constant')
         plt.plot(-elev_i, color=colors[i])
-        plt.plot(frwd[i, -1], -elev_i[-1], 'ko', markerfacecolor='k', markersize=5)
+        plt.plot(frwd[-1, i], -elev_i[-1], 'ko', markerfacecolor='k', markersize=5)
     plt.grid(True)
     plt.ylabel('Elevation [m]')
     plt.xlabel('Forward [m]')
@@ -58,8 +59,8 @@ def plt_stride_var(strides: Dict[str, Any]):
     
     # Extract final position for each stride
     if ltrl.ndim == 2:
-        ltrl = ltrl[:, -1]
-        frwd = frwd[:, -1]
+        ltrl = ltrl[-1,:]
+        frwd = frwd[-1,:]
     
     cx, cy, ex, ey, covar = compute_cov(ltrl, frwd)
     colors = plt.cm.jet(np.linspace(0, 1, len(ltrl)))

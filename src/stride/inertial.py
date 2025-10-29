@@ -100,18 +100,21 @@ def foot_fall(W: np.ndarray, A: np.ndarray, period: float, W_FF: Optional[float]
     FF[FF_index] = True
     return FF, stationary_periods
 
-def kf_tilt(period: float, quaternion: Optional[np.ndarray] = None, accel_theta: Optional[float] = None, accel_phi: Optional[float] = None, is_stationary: Optional[bool] = None) -> np.ndarray:
+def kalman_filter_tilt(period: float, quaternion, P, Q, R, accel_theta: Optional[float] = None, accel_phi: Optional[float] = None, is_stationary: Optional[bool] = None) -> tuple[np.ndarray, float, float, float]:
     # Simple complementary filter for tilt correction
     if quaternion is None:
-        return np.array([1.0, 0.0, 0.0, 0.0])
+        return np.array([1.0, 0.0, 0.0, 0.0]), 0, 1e-5,1e-1
+    
+    P = P+Q
     if is_stationary:
+        # compute Kalman gain. 
+        K = P/(P+R)
         euler = qua2eul(quaternion[np.newaxis, :])[0]
-        # Kalman gain (fixed for simplicity)
-        K = 0.01
         euler[0] = euler[0] - (euler[0] - accel_phi) * K
         euler[1] = euler[1] - (euler[1] - accel_theta) * K
         quaternion = eul2qua(euler[np.newaxis, :])[0]
-    return quaternion
+        P = (1-K)*P*(1-K) + K*R*K
+    return quaternion, P, Q, R
 
 def qua_est(W: np.ndarray, quaternion_prev: np.ndarray) -> np.ndarray:
     mag = np.sqrt(np.sum(W ** 2))
@@ -129,11 +132,11 @@ def qua_est(W: np.ndarray, quaternion_prev: np.ndarray) -> np.ndarray:
     ])
     return quaternion_sqw @ rotation
 
-def zupts(i: int, FF: np.ndarray, An: np.ndarray, Anz: np.ndarray, last_footfall: int) -> int:
+def zero_velocity_updates(i: int, FF: np.ndarray, An: np.ndarray, Anz: np.ndarray, last_footfall: int) -> int:
     if i == 1:
-        last_footfall = 0
+        last_footfall = -1
     if FF[i]:
-        step_range = np.arange(last_footfall, i + 1)
+        step_range = np.arange(last_footfall+1, i+1)
         if step_range.size < 2:
             return last_footfall
         step_samples = step_range.size
@@ -143,7 +146,7 @@ def zupts(i: int, FF: np.ndarray, An: np.ndarray, Anz: np.ndarray, last_footfall
         last_footfall = i
     return last_footfall
 
-def compute_pos(W: np.ndarray, A: np.ndarray, period: float, USE_KF: int = 1, W_FF: Optional[float] = None, A_FF: Optional[float] = None, T_FF: Optional[float] = None, MAX_T_FF: Optional[float] = None, FF: Optional[np.ndarray] = None) -> Dict[str, Any]:
+def compute_position(W: np.ndarray, A: np.ndarray, period: float, USE_KF: int = 1, W_FF: Optional[float] = None, A_FF: Optional[float] = None, T_FF: Optional[float] = None, MAX_T_FF: Optional[float] = None, FF: Optional[np.ndarray] = None) -> Dict[str, Any]:
     N = W.shape[0]
     t = np.arange(N) * period
     accel_phi, accel_theta = acc_tilt(A)
@@ -153,15 +156,21 @@ def compute_pos(W: np.ndarray, A: np.ndarray, period: float, USE_KF: int = 1, W_
     quaternion = np.zeros((N, 4))
     An = np.zeros((N, 3))
     Anz = np.zeros((N, 3))
-    quaternion[0, :] = kf_tilt(period)
+
+    # initialize default last footfall happened at time 0.
     last_footfall = 0
+
+    #kalman filter init
+    quaternion[0, :],P,Q,R = kalman_filter_tilt(period,None, None ,None, None)
+    
     for i in range(1, N):
         quaternion[i, :] = qua_est(W[i, :], quaternion[i - 1, :])
         rotation_matrix = qua2rot(quaternion[i, :])
-        An[i, :] = rotation_matrix @ A[i, :]
-        if USE_KF:
-            quaternion[i, :] = kf_tilt(period, quaternion[i, :], accel_theta[i], accel_phi[i], stationary_periods[i])
-        last_footfall = zupts(i, FF, An, Anz, last_footfall)
+        An[i, :] = (rotation_matrix @ A[i:i+1, :].T).T
+        # we always USE_KF
+        quaternion[i, :],P,Q,R = kalman_filter_tilt(period, quaternion[i, :], P, Q, R, accel_theta[i], accel_phi[i], stationary_periods[i])
+        
+        last_footfall = zero_velocity_updates(i, FF, An, Anz, last_footfall)
     result['Anz'] = Anz
     result['An'] = An
     result['A'] = A
@@ -217,24 +226,423 @@ def stride_segmentation(walk_info: Dict[str, Any], period: float, FILTER: int = 
     stepData = get_steps(swing_start, swing_finish, walk_info, period, FILTER, OUTLIER_SECTION_SAMPLES)
     return stepData
 
-def get_steps(step_start, step_end, walk_info, period, FILTER, OUTLIER_SECTION):
-    # This is a simplified version, for brevity. Full implementation would port all MATLAB logic.
-    # Returns a dict with keys: ltrl, frwd, elev, etc.
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy import signal
+
+def rotate_angle(X, Y, ang):
+    """Direct translation of the rotate_angle function"""
+    Xr = X * np.cos(ang) - Y * np.sin(ang)
+    Yr = X * np.sin(ang) + Y * np.cos(ang)
+    return Xr, Yr
+
+def get_steps(step_start, step_end, walk_info, PERIOD, FILTER, OUTLIER_SECTION, verbose=False):
+    """
+    Direct port of MATLAB get_steps function
+    
+    Parameters:
+    -----------
+    step_start : array-like
+        Start indices of steps
+    step_end : array-like
+        End indices of steps
+    walk_info : dict
+        Dictionary containing 'P', 'euler', and 'Vm' arrays
+    PERIOD : float
+        Sampling period
+    FILTER : bool
+        Whether to apply filtering
+    OUTLIER_SECTION : array-like
+        Indices of outlier sections to remove
+    verbose : bool, optional
+        Whether to plot details (default: False)
+    """
+    PLOT_DETAILS = verbose
+    
+    # DIRECTION_STEPS, determine the number of steps before and after current one, used to define a straight segment
+    DIRECTION_STEPS = 3  # default 3
+    # mean_step_direction = 0  # when DIRECTION_STEPS is 0, uncomment this
+    
+    EXTRA_FRWD_CORRECTION = 1  # default is 1. This will straighten the paths perfectly
+    # EXTRA_FRWD_CORRECTION = 0  # for hand reaching Oct 2023
+    
+    # Ensure column vectors
+    step_start = np.array(step_start).reshape(-1, 1).flatten()
+    step_end = np.array(step_end).reshape(-1, 1).flatten()
+    number_of_steps = len(step_start)
+    longest_step = np.max(step_end - step_start) + 1
+    
     P = walk_info['P']
     euler = walk_info['euler']
-    number_of_steps = len(step_start)
+    Vm = walk_info['Vm']
     
-    # Handle empty step arrays
-    if number_of_steps == 0:
-        return {'ltrl': np.array([]), 'frwd': np.array([]), 'elev': np.array([])}
-    
-    longest_step = np.max(step_end - step_start) + 1
+    # Create matrices to store results
+    ltrl_swing = np.zeros((number_of_steps, longest_step))
+    frwd_swing = np.zeros((number_of_steps, longest_step))
     ltrl = np.zeros((number_of_steps, longest_step))
     frwd = np.zeros((number_of_steps, longest_step))
+    ltrl_straighten = np.zeros((number_of_steps, longest_step))
+    frwd_straighten = np.zeros((number_of_steps, longest_step))
+    abs_ltrl = np.zeros((number_of_steps, longest_step))
+    abs_frwd = np.zeros((number_of_steps, longest_step))
     elev = np.zeros((number_of_steps, longest_step))
+    theta = np.zeros((number_of_steps, longest_step))
+    foot_heading = np.zeros(number_of_steps)
+    diff_foot_heading = np.zeros(number_of_steps)
+    start_end = np.zeros((number_of_steps, 2))
+    
+    # Compute individual step direction
+    direction = np.arctan2(P[step_end, 1] - P[step_start, 1], 
+                           P[step_end, 0] - P[step_start, 0])
+    
+    if PLOT_DETAILS:
+        # This is the average walk direction that is used to rotate the trajectory
+        Px = P[step_start, 0]
+        Py = P[step_start, 1]
+        # Linear fit (polyfit with degree 1)
+        coeffs = np.polyfit(Px, Py, 1)
+        pol = np.poly1d(coeffs)
+        # Use the atan2 to determine the right grid quadrant
+        overall_step_direction = np.arctan2(pol(Px[-1]) - pol(Px[0]), Px[-1] - Px[0])
+        frwd_pol_rot, ltrl_pol_rot = rotate_angle(Px, Py, -overall_step_direction)
+        
+        PATH_FIG = plt.figure()
+        plt.plot(frwd_pol_rot, ltrl_pol_rot, 'k')
+        plt.grid(True)
+    
+    # Unwrap the euler in order to eliminate discontinuities
+    walk_foot_heading = np.unwrap(euler[step_end, 2])
+    
+    # Perform a default line fit correction for heading
+    x = np.arange(1, len(walk_foot_heading) + 1)
+    y = walk_foot_heading
+    coeffs = np.polyfit(x, y, 1)
+    pol = np.poly1d(coeffs)
+    heading_correction = pol(x)
+    corrected_heading = y - heading_correction
+    
+    if PLOT_DETAILS:
+        ANG_FIG = plt.figure()
+        plt.plot(walk_foot_heading - coeffs[1])
+        plt.hold = True
+        plt.grid(True)
+        plt.plot(heading_correction - coeffs[1], 'r')
+        plt.plot(y - heading_correction, 'g')
+    
+    step_samples = np.zeros(number_of_steps)
+    
     for i in range(number_of_steps):
-        idx = np.arange(step_start[i], step_end[i] + 1)
-        direction = np.arctan2(P[step_end[i], 1] - P[step_start[i], 1], P[step_end[i], 0] - P[step_start[i], 0])
-        frwd[i, :len(idx)], ltrl[i, :len(idx)] = rotate_angle(P[idx, 0], P[idx, 1], -direction)
-        elev[i, :len(idx)] = P[idx, 2]
-    return {'ltrl': ltrl, 'frwd': frwd, 'elev': elev} 
+        step_len = step_end[i] - step_start[i] + 1
+        
+        # Rotate for swing
+        frwd_swing[i, :step_len] = (P[step_start[i]:step_end[i]+1, 0] * np.cos(-direction[i]) - 
+                                    P[step_start[i]:step_end[i]+1, 1] * np.sin(-direction[i]))
+        frwd_swing[i, step_len:] = frwd_swing[i, step_len-1]
+        
+        ltrl_swing[i, :step_len] = (P[step_start[i]:step_end[i]+1, 0] * np.sin(-direction[i]) + 
+                                    P[step_start[i]:step_end[i]+1, 1] * np.cos(-direction[i]))
+        ltrl_swing[i, step_len:] = ltrl_swing[i, step_len-1]
+        
+        # Uses the nearby steps to determine the angle, is less sensitive to gyro drift
+        if DIRECTION_STEPS:
+            # Select the steps +/- DIRECTION_STEPS
+            if i > DIRECTION_STEPS and number_of_steps - i > DIRECTION_STEPS:
+                nearby_steps_index = np.arange(i - DIRECTION_STEPS, i + DIRECTION_STEPS + 1)
+            elif i <= DIRECTION_STEPS:
+                nearby_steps_index = np.arange(0, i + DIRECTION_STEPS + 1)
+            else:
+                nearby_steps_index = np.arange(i - DIRECTION_STEPS, len(step_start))
+            
+            # Find local direction of travel
+            nearby_steps = step_start[nearby_steps_index]
+            x_local = P[nearby_steps, 0]
+            y_local = P[nearby_steps, 1]
+            coeffs_local = np.polyfit(x_local, y_local, 1)
+            pol_local = np.poly1d(coeffs_local)
+            mean_step_direction = np.arctan2(pol_local(x_local[-1]) - pol_local(x_local[0]), 
+                                            x_local[-1] - x_local[0])
+            
+            # Find a local heading correction
+            y_heading = walk_foot_heading[nearby_steps_index]
+            x_heading = nearby_steps_index
+            coeffs_heading = np.polyfit(x_heading, y_heading, 1)
+            pol_heading = np.poly1d(coeffs_heading)
+            heading_correction = pol_heading(x_heading)
+            current_index = np.where(x_heading == i)[0][0]
+            corrected_heading[i] = y_heading[current_index] - heading_correction[current_index]
+        else:
+            mean_step_direction = 0  # If DIRECTION_STEPS is 0
+        
+        frwd_rot, ltrl_rot = rotate_angle(P[step_start[i]:step_end[i]+1, 0], 
+                                          P[step_start[i]:step_end[i]+1, 1], 
+                                          -mean_step_direction)
+        frwd[i, :step_len] = frwd_rot
+        frwd[i, step_len:] = frwd[i, step_len-1]
+        
+        ltrl[i, :step_len] = ltrl_rot
+        ltrl[i, step_len:] = ltrl[i, step_len-1]
+        
+        if i > 0:
+            ltrl[i, :] = ltrl[i, :] - ltrl[i, 0] + ltrl[i-1, -1]
+        else:
+            ltrl[i, :] = ltrl[i, :] - ltrl[i, 0]
+        
+        # Store elevation information
+        elev[i, :step_len] = P[step_start[i]:step_end[i]+1, 2]
+        elev[i, step_len:] = elev[i, step_len-1]
+        
+        # Store pitch angle
+        theta[i, :step_len] = euler[step_start[i]:step_end[i]+1, 1]
+        theta[i, step_len:] = theta[i, step_len-1]
+        
+        step_samples[i] = step_end[i] - step_start[i]
+        
+        # Store heading angle
+        foot_heading[i] = corrected_heading[i]
+        diff_foot_heading[i] = euler[step_end[i], 2] - euler[step_start[i], 2]
+        start_end[i, :] = [step_start[i], step_end[i]]
+    
+    ltrl_end = ltrl[:, -1]
+    frwd_end = frwd[:, -1]
+    coeffs = np.polyfit(frwd_end, ltrl_end, 1)
+    pol = np.poly1d(coeffs)
+    frwd_pol = np.linspace(np.min(frwd_end), np.max(frwd_end), 100)
+    ltrl_pol = pol(frwd_pol)
+    
+    if PLOT_DETAILS:
+        plt.figure(ANG_FIG.number)
+        plt.plot(foot_heading, 'k')
+        plt.xlabel('Step #')
+        plt.ylabel('Ang [rad]')
+        plt.legend(['Org', 'Linear Fit', 'Line-Fit Correction', 'Piecewise Correction'])
+        
+        plt.figure(PATH_FIG.number)
+        plt.plot(frwd[:, -1], ltrl[:, -1], 'b')
+        plt.xlabel('X [m]')
+        plt.ylabel('Y [m]')
+        plt.plot(frwd_end, ltrl_end, '*')
+        plt.plot(frwd_pol, ltrl_pol, 'b')
+        plt.legend(['Line-Fit Correction', 'Piecewise Correction', '', ''])
+    
+    if EXTRA_FRWD_CORRECTION:
+        mean_step_direction = np.arctan(coeffs[0])
+        frwd_pol_rot, ltrl_pol_rot = rotate_angle(frwd_pol, ltrl_pol, -mean_step_direction)
+        ltrl_pol_rot = ltrl_pol_rot - np.mean(ltrl_pol_rot)
+        frwd_end, ltrl_endr = rotate_angle(frwd_end, ltrl_end, -mean_step_direction)
+        center_ltrl_end = np.mean(ltrl_endr)
+        ltrl_endr = ltrl_endr - center_ltrl_end
+        
+        for i in range(number_of_steps):
+            frwd_straighten[i, :], ltrl_straighten[i, :] = rotate_angle(frwd[i, :], ltrl[i, :], 
+                                                                        -mean_step_direction)
+            ltrl_straighten[i, :] = ltrl_straighten[i, :] - center_ltrl_end
+        
+        ltrl = ltrl_straighten
+        frwd = frwd_straighten
+        
+        if PLOT_DETAILS:
+            plt.plot(frwd_pol_rot, ltrl_pol_rot, 'g')
+            plt.plot(frwd_end, ltrl_endr, 'g*')
+            plt.plot(frwd_straighten[:, -1], ltrl_straighten[:, -1], 'g')
+            plt.xlabel('X [m]')
+            plt.ylabel('Y [m]')
+            plt.legend(['Line-Fit Correction', 'Piecewise Correction', '', '', 'Best correction'])
+    
+    # Translate foot fall location to the origin
+    frwd_swing = frwd_swing - frwd_swing[:, 0:1]
+    abs_frwd = frwd.copy()
+    frwd = frwd - frwd[:, 0:1]
+    ltrl_swing = ltrl_swing - ltrl_swing[:, 0:1]
+    abs_ltrl = ltrl.copy()
+    ltrl = ltrl - ltrl[:, 0:1]
+    elev = elev - elev[:, 0:1]
+    # theta = theta - theta[:, 0:1]  # commented in original
+    
+    # Check for negative values in frwd
+    if np.any(frwd[:, -1] < 0):
+        print('OSMAN NEGATIVE IN FRWRD')
+        frwd = np.abs(frwd)
+    
+    # Compute step speed
+    step_length = frwd[:, -1]
+    time = step_samples * PERIOD
+    step_speed = step_length / time
+    coeffs = np.polyfit(step_speed, step_length, 1)
+    pol = np.poly1d(coeffs)
+    step_length_fit = pol(step_speed)
+    frwd_speed_compensated = step_length - step_length_fit
+    frwd_speed = step_speed
+    
+    # Compute first order statistics and assemble result structure
+    result = {
+        'frwd_swing': frwd_swing.T,
+        'ltrl_swing': ltrl_swing.T,
+        'frwd': frwd.T,
+        'ltrl': ltrl.T,
+        'abs_ltrl': abs_ltrl.T,
+        'abs_frwd': abs_frwd.T,
+        'elev': elev.T,
+        'theta': theta.T,
+        'start_end': start_end.T,
+        'foot_heading': foot_heading,
+        'diff_foot_heading': diff_foot_heading,
+        'step_samples': step_samples,
+        'time': time,
+        'frwd_speed_compensated': frwd_speed_compensated,
+        'frwd_speed': frwd_speed
+    }
+    
+    # Eliminate user defined outliers
+    out_of_bound = []
+    for i in range(number_of_steps):
+        if step_start[i] in OUTLIER_SECTION or step_end[i] in OUTLIER_SECTION:
+            out_of_bound.append(i)
+    
+    if out_of_bound:
+        print('User defined outliers')
+        result, number_of_steps = cut_step_section(result, out_of_bound, number_of_steps)
+    
+    if PLOT_DETAILS:
+        t = np.arange(len(Vm)) * PERIOD
+        plt.figure()
+        plt.plot(t, Vm)
+        if len(OUTLIER_SECTION) > 0:
+            plt.plot(t[OUTLIER_SECTION], Vm[OUTLIER_SECTION], '.y')
+        plt.plot(t[step_start[0]], Vm[step_start[0]], '*g')
+        plt.plot(t[step_end[-1]], Vm[step_end[-1]], '*r')
+        plt.xlabel('Sample #')
+        plt.ylabel('Speed [m/sec]')
+        plt.legend(['Vm', 'Start', 'End'])
+        plt.grid(True)
+        plt.show()
+    
+    if FILTER:
+        result, number_of_steps = filter_steps(result, number_of_steps)
+    
+    return result
+
+
+def cut_step_section(stride, out_of_bound, number_of_steps):
+    """
+    Remove outlier steps from the stride data
+    
+    Parameters:
+    -----------
+    stride : dict
+        Dictionary containing all step data
+    out_of_bound : list
+        Indices of steps to remove
+    number_of_steps : int
+        Current number of steps
+    
+    Returns:
+    --------
+    stride : dict
+        Updated stride dictionary with outliers removed
+    number_of_steps : int
+        New number of steps after removal
+    """
+    if out_of_bound:
+        # Delete columns for 2D arrays (note: in Python, we need to use np.delete)
+        stride['frwd_swing'] = np.delete(stride['frwd_swing'], out_of_bound, axis=1)
+        stride['ltrl_swing'] = np.delete(stride['ltrl_swing'], out_of_bound, axis=1)
+        stride['frwd'] = np.delete(stride['frwd'], out_of_bound, axis=1)
+        stride['ltrl'] = np.delete(stride['ltrl'], out_of_bound, axis=1)
+        stride['abs_ltrl'] = np.delete(stride['abs_ltrl'], out_of_bound, axis=1)
+        stride['abs_frwd'] = np.delete(stride['abs_frwd'], out_of_bound, axis=1)
+        stride['elev'] = np.delete(stride['elev'], out_of_bound, axis=1)
+        stride['theta'] = np.delete(stride['theta'], out_of_bound, axis=1)
+        stride['start_end'] = np.delete(stride['start_end'], out_of_bound, axis=1)
+        
+        # Delete elements for 1D arrays
+        stride['foot_heading'] = np.delete(stride['foot_heading'], out_of_bound)
+        stride['diff_foot_heading'] = np.delete(stride['diff_foot_heading'], out_of_bound)
+        stride['step_samples'] = np.delete(stride['step_samples'], out_of_bound)
+        stride['time'] = np.delete(stride['time'], out_of_bound)
+        stride['frwd_speed_compensated'] = np.delete(stride['frwd_speed_compensated'], out_of_bound)
+        stride['frwd_speed'] = np.delete(stride['frwd_speed'], out_of_bound)
+        
+        new_number_of_steps = number_of_steps - len(out_of_bound)
+        print(f'New number of steps {new_number_of_steps} out of {number_of_steps}')
+        number_of_steps = new_number_of_steps
+    
+    return stride, number_of_steps
+
+
+def filter_steps(stride, number_of_steps):
+    """
+    Filter out steps that are not within known specifications
+    
+    Parameters:
+    -----------
+    stride : dict
+        Dictionary containing all step data
+    number_of_steps : int
+        Current number of steps
+        
+    Returns:
+    --------
+    stride : dict
+        Filtered stride dictionary
+    number_of_steps : int
+        New number of steps after filtering
+    """
+    # Filter parameters
+    MAX_STEP_LENGTH = 1.8  # Used to eliminate very long steps likely caused by non-detected footfalls
+    MIN_STEP_LENGTH = 0.5  # Used to eliminate very short steps likely caused by non-detected footfalls
+    MAX_VAR = 2  # Eliminates outliers based on the variance from the median value
+    FILTER_ELEVATION = 0
+    
+    # Some of the filters use a double STD based filtering process
+    
+    # Eliminate long steps above the maximum limit
+    frwd = stride['frwd'].T
+    median_pos_frwd = np.median(frwd[:, -1])
+    std_pos_frwd = np.std(frwd[:, -1])
+    outlier = frwd[:, -1] > MAX_STEP_LENGTH
+    outlier = np.where(outlier)[0]
+    if len(outlier) > 0:
+        print('_frwd LONG')
+        stride, number_of_steps = cut_step_section(stride, outlier, number_of_steps)
+    
+    # Eliminate very short steps
+    frwd = stride['frwd'].T
+    median_pos_frwd = np.median(frwd[:, -1])
+    std_pos_frwd = np.std(frwd[:, -1])
+    outlier = frwd[:, -1] < MIN_STEP_LENGTH
+    outlier = np.where(outlier)[0]
+    if len(outlier) > 0:
+        print('_frwd SHORT')
+        stride, number_of_steps = cut_step_section(stride, outlier, number_of_steps)
+    
+    # Eliminate steps away from the length median value
+    frwd = stride['frwd'].T
+    median_pos_frwd = np.median(frwd[:, -1])
+    std_pos_frwd = np.std(frwd[:, -1])
+    outlier = np.abs(frwd[:, -1] - median_pos_frwd) > std_pos_frwd * MAX_VAR
+    outlier = np.where(outlier)[0]
+    if len(outlier) > 0:
+        print('_frwd +2 VAR')
+        stride, number_of_steps = cut_step_section(stride, outlier, number_of_steps)
+    
+    # Eliminate steps that have too much side deviation
+    ltrl = stride['ltrl'].T
+    std_pos_ltrl = np.std(ltrl[:, -1])
+    outlier = np.abs(ltrl[:, -1]) > std_pos_ltrl * MAX_VAR
+    outlier = np.where(outlier)[0]
+    if len(outlier) > 0:
+        print('_ltrl +2 VAR')
+        stride, number_of_steps = cut_step_section(stride, outlier, number_of_steps)
+    
+    if FILTER_ELEVATION:
+        # Eliminate steps that have too much vertical deviation
+        elev = stride['elev'].T
+        median_pos_elev = np.median(elev[:, -1])
+        std_pos_elev = np.std(elev[:, -1])
+        outlier = np.abs(elev[:, -1] - median_pos_elev) > std_pos_elev * MAX_VAR
+        outlier = np.where(outlier)[0]
+        if len(outlier) > 0:
+            print('_elev +2 VAR steps')
+            stride, number_of_steps = cut_step_section(stride, outlier, number_of_steps)
+    
+    return stride, number_of_steps

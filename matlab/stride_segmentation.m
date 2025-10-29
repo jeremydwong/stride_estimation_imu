@@ -28,5 +28,5 @@ function stepData = stride_segmentation(walk_info,PERIOD,FILTER,OUTLIER_SECTION_
 	swing_finish(too_long) = [];
 
 	stepData = get_steps(swing_start,swing_finish,walk_info,PERIOD,FILTER,OUTLIER_SECTION_SAMPLES); 
-
+    fprintf('stride segmentation complete.\n')
 

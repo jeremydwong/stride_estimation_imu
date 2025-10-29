@@ -1,8 +1,9 @@
 % Author: Lauro Ojeda, 2008-2015
-function [W,A, static_period, M]  =  getdata(W,A,PERIOD,SECTION_SECONDS,BIAS,M) %<------- added static period
+function [W,A, static_period, M]  =  getdata(Win,A,PERIOD,SECTION_SECONDS,BIAS,M) %<------- added static period
 % BIAS, is the static time at the beggining of the experiment
 % leave BIAS the parameter empty to make the system detect the static time automatically
 % 
+W = Win;
 GRAVITY = 9.80297286843;
 if(exist('SECTION_SECONDS','var') & ~isempty(SECTION_SECONDS))
 	number_of_sections = size(SECTION_SECONDS,1);

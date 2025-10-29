@@ -5,10 +5,10 @@
 
 % Define the section (in seconds) that will need to be processed and segment the IMU data accordingly
 SECTION = [240,350];
-[Wb,Ab] = getdata(Wb,Ab,PERIOD,SECTION);
+[Wb_section,Ab_section] = getdata(Wb,Ab,PERIOD,SECTION);
 
 % Perform inertial mechanization
-walk_info = compute_pos(Wb,Ab,PERIOD);
+walk_info = compute_pos(Wb_section,Ab_section,PERIOD);
 
 % Segment strides only for the walking period
 strides = stride_segmentation(walk_info,PERIOD);

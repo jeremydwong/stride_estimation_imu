@@ -272,7 +272,7 @@ def getdata_apdm(file_path: str, orientation: Optional[int] = None) -> Tuple[np.
     
     return W, A, period, M
 
-def detect_quite_time(W: np.ndarray, period: float) -> np.ndarray:
+def detect_quiet_time(W: np.ndarray, period: float) -> np.ndarray:
     """
     Auto-detect static period in angular velocity data.
     Returns indices of static period.
@@ -285,13 +285,13 @@ def detect_quite_time(W: np.ndarray, period: float) -> np.ndarray:
     dWm = np.diff(Wm)
     low_dynamic_periods = np.where(np.abs(dWm) < MAXIMUM_STATIC_RATE)[0]
     diff_low_dynamic_periods = np.diff(low_dynamic_periods)
-    not_static = np.array([0] + list(np.where(diff_low_dynamic_periods > CONTINIOUS_SAMPLE_SPACE)[0] + 1) + [len(diff_low_dynamic_periods)])
+    not_static = np.array([0] + list(np.where(diff_low_dynamic_periods > CONTINIOUS_SAMPLE_SPACE)[0]) + [len(diff_low_dynamic_periods)-1])
     diff_not_static = np.diff(not_static)
     most_likely_static_sections = np.where(diff_not_static > MINIMUN_STATIC_SAMPLES)[0]
     if most_likely_static_sections.size == 0:
         most_likely_static_sections = np.where(diff_not_static > MINIMUN_STATIC_SAMPLES // 10)[0]
     start_static_section = low_dynamic_periods[not_static[most_likely_static_sections]]
-    end_static_section = low_dynamic_periods[not_static[most_likely_static_sections + 1]]
+    end_static_section = low_dynamic_periods[not_static[most_likely_static_sections+1]]
     if len(start_static_section) > 0:
         static_period = np.concatenate([np.arange(start, end + 1) for start, end in zip(start_static_section, end_static_section)])
         bias_var = np.std(Wm[static_period])
@@ -303,23 +303,38 @@ def detect_quite_time(W: np.ndarray, period: float) -> np.ndarray:
         static_period = np.arange(min(100, len(Wm)))
     return static_period
 
-def getdata(W: np.ndarray, A: np.ndarray, period: float, section_seconds: Optional[Any] = None, bias: Optional[float] = None, M: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]:
+def getdata(Win: np.ndarray, A: np.ndarray, period: float, section_seconds: Optional[Any] = None, bias: Optional[float] = None, M: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """
     Section data, apply bias correction, normalize accelerometer, and plot signals.
     """
-    if section_seconds is not None and len(section_seconds) > 0:
-        section_samples = np.concatenate([
-            np.arange(int(np.floor(start / period)), int(np.floor(end / period)) + 1)
-            for start, end in np.atleast_2d(section_seconds)
-        ])
-        W = W[section_samples, :]
-        A = A[section_samples, :]
-        if M is not None:
-            M = M[section_samples, :]
+    W = Win.copy()
+    if not isinstance(section_seconds, list):
+        raise TypeError("section_seconds must be a list of tuples")
+
+    # Handle single tuple case - wrap it in a list
+    if isinstance(section_seconds, tuple):
+        section_seconds = [section_seconds]
+    elif len(section_seconds) > 0 and not isinstance(section_seconds[0], tuple):
+        # If it's a list but not of tuples, try to convert
+        section_seconds = [tuple(section_seconds)]
+
+    # Now build SECTION_SAMPLES
+    SECTION_SAMPLES = []
+    for section in section_seconds:
+        start_sec, end_sec = section
+        SECTION_SAMPLES.extend(range(
+            int(np.floor(start_sec / period))-1,
+            int(np.floor(end_sec / period))
+        ))
+
+    W = W[SECTION_SAMPLES, :]
+    A = A[SECTION_SAMPLES, :]
+    if M is not None:
+        M = M[SECTION_SAMPLES, :]
     if bias is not None:
         static_period = np.arange(int(bias / period))
     else:
-        static_period = detect_quite_time(W, period)
+        static_period = detect_quiet_time(W, period)
     W = W - np.mean(W[static_period, :], axis=0)
     static_acceleration = np.sqrt(np.sum(A[static_period, :] ** 2, axis=1))
     gravity_measurement = np.mean(static_acceleration)
