@@ -14,8 +14,10 @@ SECTION = [2200,3500];
 [left_Wb,left_Ab] = getdata(left_Wb,left_Ab,PERIOD,'sectionSeconds',SECTION);
 [right_Wb,right_Ab] = getdata(right_Wb,right_Ab,PERIOD,'sectionSeconds',SECTION);
 
-% Process data from the two IMUs simultaneously 
+% Process data from the two IMUs simultaneously
 [left_walk_info,right_walk_info] = compute_pos_two_imus(left_Wb,left_Ab,right_Wb,right_Ab,PERIOD);
+
+[ff_walking,ff_max_speed] = detect_walking_section(left_walk_info)
 
 % Segment steps
 left_strides = stride_segmentation(left_walk_info,PERIOD);

@@ -1,15 +1,23 @@
 % Author: Lauro Ojeda, 2012-2015
 function [W,A,PERIOD,M] = getdata_apdm(FILE,ORIENTATION)
-	if(~exist('FILE','var')) FILE = 'data.h5'; end;
-	caseIdList = hdf5read(FILE,'/CaseIdList');
-	groupName = caseIdList(1).data;
-	FREQ = hdf5read(FILE, [groupName '/SampleRate']);
-	PERIOD = 1/double(FREQ);
+    
+    info = h5info(FILE);
+    FREQ  = h5readatt(FILE, info.Groups(2).Groups(1).Groups(1).Name, 'Sample Rate');
+    PERIOD = 1/double(FREQ);
+    
+    sensorid = info.Groups(2).Groups(1).Name;
+    
+    
+    a = (h5read(FILE, [info.Groups(2).Groups(1).Name,'/Accelerometer']))';
+    w = (h5read(FILE, [info.Groups(2).Groups(1).Name,'/Gyroscope']))';
+    m = (h5read(FILE, [info.Groups(2).Groups(1).Name,'/Magnetometer']))';
+    time = h5read(FILE, [info.Groups(2).Groups(1).Name,'/Time']);   
+% 	a = hdf5read(FILE, [groupName '/Calibrated/Accelerometers'])'; %Transposed to make Nx3 in MATLAB
+% 	w = hdf5read(FILE, [groupName '/Calibrated/Gyroscopes'])'; %Transposed to make Nx3 in MATLAB
+% 	m = hdf5read(FILE, [groupName '/Calibrated/Magnetometers'])'; %Transposed to make Nx3 in MATLAB
+% 	time = hdf5read(FILE, [groupName '/Time']);
 
-	a = hdf5read(FILE, [groupName '/Calibrated/Accelerometers'])'; %Transposed to make Nx3 in MATLAB
-	w = hdf5read(FILE, [groupName '/Calibrated/Gyroscopes'])'; %Transposed to make Nx3 in MATLAB
-	m = hdf5read(FILE, [groupName '/Calibrated/Magnetometers'])'; %Transposed to make Nx3 in MATLAB
-	time = hdf5read(FILE, [groupName '/Time']);
+
 	ORIGINAL = 0;
 	LED_UP_RIGHT_FRWD = 1; % This one is normally used on feet
 	LED_UP_LEFT_FRWD = 2;

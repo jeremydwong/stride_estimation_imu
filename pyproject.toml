@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stride-imu"
+version = "0.1"
+dependencies = [
+    "numpy==1.26.4",
+    "scipy==1.11.4",
+    "pandas==2.2.2",
+    "matplotlib==3.8.4",
+    "h5py==3.10.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -2,29 +2,32 @@ import matplotlib.pyplot as plt
 import numpy as np
 from typing import Any, Dict
 
-def plt_ltrl_frwd_strides(strides: Dict[str, Any]):
+def plt_ltrl_frwd_strides(strides: Dict[str, Any], show: bool = True):
     """Plot lateral vs forward strides."""
     ltrl = strides['ltrl']
     frwd = strides['frwd']
     n = ltrl.shape[0]
     colors = plt.cm.jet(np.linspace(0, 1, ltrl.shape[1]))
-    plt.figure()
+    if show:
+        plt.figure()
     for i in range(ltrl.shape[1]):
         plt.plot(ltrl[:,i], frwd[:,i], color=colors[i])
-        
+
     plt.scatter(ltrl[-1,:], frwd[-1,:], s=20,marker='o')
     plt.grid(True)
     plt.ylabel('Frwd [m]')
     plt.xlabel('Ltrl [m]')
-    plt.show()
+    if show:
+        plt.show()
 
-def plt_frwd_elev_strides(strides: Dict[str, Any]):
+def plt_frwd_elev_strides(strides: Dict[str, Any], show: bool = True):
     """Plot forward vs elevation strides."""
     frwd = strides['frwd']
     elev = strides['elev']
     n = frwd.shape[1]
     colors = plt.cm.jet(np.linspace(0, 1, n))
-    plt.figure()
+    if show:
+        plt.figure()
     for i in range(n):
         elev_i = elev[:,i]
         delev = np.diff(elev_i)
@@ -40,31 +43,35 @@ def plt_frwd_elev_strides(strides: Dict[str, Any]):
     plt.grid(True)
     plt.ylabel('Elevation [m]')
     plt.xlabel('Forward [m]')
-    plt.show()
+    if show:
+        plt.show()
 
-def plt_stride_var(strides: Dict[str, Any]):
+def plt_stride_var(strides: Dict[str, Any], show: bool = True):
     """Plot stride variability ellipse and points."""
     ltrl = strides['ltrl']
     frwd = strides['frwd']
-    
+
     # Handle empty strides
     if ltrl.size == 0 or frwd.size == 0:
-        plt.figure()
+        if show:
+            plt.figure()
         plt.grid(True)
         plt.ylabel('Frwd [m]')
         plt.xlabel('Ltrl [m]')
         plt.title('No strides detected')
-        plt.show()
+        if show:
+            plt.show()
         return
-    
+
     # Extract final position for each stride
     if ltrl.ndim == 2:
         ltrl = ltrl[-1,:]
         frwd = frwd[-1,:]
-    
+
     cx, cy, ex, ey, covar = compute_cov(ltrl, frwd)
     colors = plt.cm.jet(np.linspace(0, 1, len(ltrl)))
-    plt.figure()
+    if show:
+        plt.figure()
     for i in range(len(ltrl)):
         plt.plot(cx[i], cy[i], 'o', markeredgecolor='k', markerfacecolor=colors[i], markersize=5)
     plt.plot(ex, ey, color='r', linewidth=3)
@@ -72,8 +79,25 @@ def plt_stride_var(strides: Dict[str, Any]):
     plt.ylabel('Frwd [m]')
     plt.xlabel('Ltrl [m]')
     plt.axis('equal')
-    plt.show()
+    if show:
+        plt.show()
 
+def plt_walk_info_position(walk_info,s=5):
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    # Plot the points
+    P = walk_info['P']
+    X = P[:,0]
+    Y = P[:,1]
+    Z = P[:,2]
+    ff = walk_info['FF']
+    ax.scatter(X[ff], Y[ff], Z[ff], c='blue', marker='.', s=s)
+    ax.set_xlabel('X Label')
+    ax.set_ylabel('Y Label')
+    ax.set_zlabel('Z Label')
+    ax.set_title('3D IMU Position')
+    plt.show()
+	
 def compute_cov(x, y, shift_to_zero=True):
     x = np.asarray(x)
     y = np.asarray(y)

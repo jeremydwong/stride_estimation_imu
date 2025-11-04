@@ -1,0 +1,11 @@
+README.md
+pyproject.toml
+src/stride/__init__.py
+src/stride/apdm.py
+src/stride/inertial.py
+src/stride/plotting.py
+src/stride_imu.egg-info/PKG-INFO
+src/stride_imu.egg-info/SOURCES.txt
+src/stride_imu.egg-info/dependency_links.txt
+src/stride_imu.egg-info/requires.txt
+src/stride_imu.egg-info/top_level.txt

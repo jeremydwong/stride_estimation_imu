@@ -8,7 +8,7 @@ SECTION = [240,350];
 [Wb_section,Ab_section] = getdata(Wb,Ab,PERIOD,SECTION);
 
 % Perform inertial mechanization
-walk_info = compute_pos(Wb_section,Ab_section,PERIOD);
+walk_info = compute_pos(Wb_section,Ab,PERIOD);
 
 % Segment strides only for the walking period
 strides = stride_segmentation(walk_info,PERIOD);

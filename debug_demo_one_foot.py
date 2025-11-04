@@ -9,7 +9,7 @@ from src.stride.inertial import compute_position, stride_segmentation
 from src.stride.plotting import plt_ltrl_frwd_strides, plt_frwd_elev_strides, plt_stride_var
 
 # Path to the APDM .h5 file (update if needed)
-H5_FILE = os.path.join('matlab', '20120418-132857_sensor_data_monitor_403_label_Right.h5')
+H5_FILE = os.path.join(os.getcwd(),'matlab', '20120418-132857_sensor_data_monitor_403_label_Right.h5')
 MATLAB_FILE = 'matlab_demo4.mat'
 
 def compare_arrays(python_arr, matlab_arr, name, rtol=1e-5, atol=1e-8):

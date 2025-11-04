@@ -146,7 +146,24 @@ def zero_velocity_updates(i: int, FF: np.ndarray, An: np.ndarray, Anz: np.ndarra
         last_footfall = i
     return last_footfall
 
+
 def compute_position(W: np.ndarray, A: np.ndarray, period: float, USE_KF: int = 1, W_FF: Optional[float] = None, A_FF: Optional[float] = None, T_FF: Optional[float] = None, MAX_T_FF: Optional[float] = None, FF: Optional[np.ndarray] = None) -> Dict[str, Any]:
+    """
+    compute_position(W, A, period, USE_KF=1, W_FF=None, A_FF=None, T_FF=None, MAX_T_FF=None,FF=None)
+    
+    Parameters:
+    -----------
+    W: np.ndarray,                                          # gyro
+    A: np.ndarray,                                          # accelerometer
+    period: float,                                          # usually 1/128
+    USE_KF: int = 1,                                        # we always want to use the kalman filter
+    W_FF: Optional[float] = None,                           # 
+    A_FF: Optional[float] = None, 
+    T_FF: Optional[float] = None, 
+    MAX_T_FF: Optional[float] = None, 
+    FF: Optional[np.ndarray] = None) -> Dict[str, Any]:
+    """
+    
     N = W.shape[0]
     t = np.arange(N) * period
     accel_phi, accel_theta = acc_tilt(A)
@@ -191,6 +208,18 @@ def compute_position(W: np.ndarray, A: np.ndarray, period: float, USE_KF: int = 
     return result
 
 def detect_walking_section(walk_info: Dict[str, Any], MIN_WALK_SPEED: float = 2.0) -> np.ndarray:
+    
+    """
+    detect_walking_section(walk_info: Dict[str, Any], MIN_WALK_SPEED: float = 2.0) -> np.ndarray:
+    
+    Parameters:
+    -----------
+    walk_info : Dict[str,Any] 
+    MIN_WALK_SPEED : float = 2.0
+
+    Filter the detected footfalls in walk_info [FF] based on foot velocity
+    Also filter out steps where 
+    """   
     FF = np.where(walk_info['FF'])[0]
     Vm = walk_info['Vm']
     peaks_idx, _ = find_peaks(Vm, height=MIN_WALK_SPEED)
@@ -204,7 +233,7 @@ def detect_walking_section(walk_info: Dict[str, Any], MIN_WALK_SPEED: float = 2.
     FF_walking = np.zeros_like(Vm, dtype=bool)
     if footfall_index.size > 0:
         FF_walking[FF[footfall_index[0]:footfall_index[-1] + 1]] = True
-    return FF_walking
+        return FF_walking
 
 def stride_segmentation(walk_info: Dict[str, Any], period: float, FILTER: int = 0, OUTLIER_SECTION_SECONDS: Optional[Any] = None) -> Dict[str, Any]:
     if OUTLIER_SECTION_SECONDS is not None:
@@ -238,7 +267,7 @@ def rotate_angle(X, Y, ang):
 
 def get_steps(step_start, step_end, walk_info, PERIOD, FILTER, OUTLIER_SECTION, verbose=False):
     """
-    Direct port of MATLAB get_steps function
+    get_steps(step_start, step_end,walk_info,PERIOD,FILTER,OUTLIER_SECTION,verbose=Fals)
     
     Parameters:
     -----------
@@ -644,5 +673,298 @@ def filter_steps(stride, number_of_steps):
         if len(outlier) > 0:
             print('_elev +2 VAR steps')
             stride, number_of_steps = cut_step_section(stride, outlier, number_of_steps)
-    
+
     return stride, number_of_steps
+
+
+def foot_fall_opposite_velocity(Vm: np.ndarray, FF_orig: np.ndarray, period: float,
+                                  merge_mode: str = 'MAX_SPEED_OR_ORIG',
+                                  plot_details: bool = False, WALK_SPEED_PERCENTAGE = 0.8,MIN_WALK_SPEED = 2,ACCEL_SLOW_STEPS = 1,STEP_DURATION_VARIABILITY = 0.5) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Detect foot falls using the velocity of the opposite foot (temporally, should be near max other-foot speed)
+
+    Parameters:
+    -----------
+    Vm : np.ndarray
+        Velocity magnitude array
+    FF_org : np.ndarray
+        Original footfall detection boolean array
+    period : float
+        Sampling period
+    merge_mode : str, optional
+        Merge strategy (default: 'MAX_SPEED_OR_ORIG')
+    plot_details : bool, optional
+        Whether to plot debugging information (default: False)
+
+    WALK_SPEED_PERCENTAGE = 0.8  # as a percentage of median speed; For normal walk use .8, for varying speed use .5
+    MIN_WALK_SPEED = 2  # Use 2 for normal walk, 1.2 for varying speeds
+    ACCEL_SLOW_STEPS = 1  # Number of steps used during acceleration and slowing down phase
+    STEP_DURATION_VARIABILITY = 0.5  # Use .5 for normal walk and 1.9+ for varying speed
+
+        
+    Returns:
+    --------
+    tuple
+        (FF, FF_walking, FF_max_speed) - footfall arrays
+    """
+
+    MIN_FF_SEPARATION = int(np.floor((1/period) / 2.5))
+    
+    # Find the location of the maximum velocities for the opposite foot
+    peaks_idx, _ = find_peaks(Vm, height=MIN_WALK_SPEED, distance=MIN_FF_SEPARATION)
+
+    # Designate max velocity points as likely footfalls for opposite foot
+    FF_max_speed = np.zeros(len(Vm), dtype=bool)
+    FF_max_speed[peaks_idx] = True
+
+    # Determine the longest section with continuous motion
+    walking_ff_time = np.diff(peaks_idx)
+    median_ff_time = np.median(walking_ff_time)
+    walk_section = (walking_ff_time < median_ff_time * (1 + STEP_DURATION_VARIABILITY))
+
+    # Add padding to find start/end of walks
+    B = np.concatenate(([0], walk_section, [0]))
+    start_walks = np.where(np.diff(B.astype(int)) == 1)[0]
+    end_walks = np.where(np.diff(B.astype(int)) == -1)[0]
+    walk_sizes = end_walks - start_walks
+    idx_walk = np.argmax(walk_sizes)
+    start_walk = start_walks[idx_walk]
+    end_walk = end_walks[idx_walk]
+
+    # Eliminate first and last step, which may correspond to acceleration and slowing down
+    start_walk = start_walk + ACCEL_SLOW_STEPS
+    end_walk = end_walk - ACCEL_SLOW_STEPS
+
+    if plot_details:
+        import matplotlib.pyplot as plt
+        plt.figure()
+        plt.plot(walking_ff_time)
+        plt.plot(walk_section * median_ff_time, 'ok')
+        plt.plot(start_walk, walking_ff_time[start_walk], '.g')
+        plt.plot(end_walk, walking_ff_time[end_walk], '.r')
+        plt.legend(['Time between steps', 'Median walk time', 'Beginning of Walk', 'End of Walk'])
+        plt.title('Stride duration')
+
+        plt.figure()
+        plt.plot(Vm)
+        plt.plot(peaks_idx, Vm[peaks_idx], '.k')
+        plt.plot(peaks_idx[start_walk], Vm[peaks_idx[start_walk]], '*g')
+        plt.plot(peaks_idx[end_walk], Vm[peaks_idx[end_walk]], '*r')
+        plt.legend(['Speed', 'Max Speed', 'Beginning of Walk', 'End of Walk'])
+        plt.title('Increase STEP_DURATION_VARIABILITY until it includes all the walking area')
+
+    # Walking portion is defined at the point that the speed reaches WALK_SPEED_PERCENTAGE of the median speed value
+    median_vel = np.mean(Vm[FF_max_speed])
+    likely_walk_sections = np.where(Vm > median_vel * WALK_SPEED_PERCENTAGE)[0]
+    FF_stand_still_mask = np.zeros(len(FF_orig), dtype=bool)
+    FF_stand_still_mask[:likely_walk_sections[0]] = True
+    FF_stand_still_mask[likely_walk_sections[-1]:] = True
+
+    FF_walking = np.zeros(len(FF_max_speed), dtype=bool)
+    FF_walking[peaks_idx[start_walk]:peaks_idx[end_walk]+1] = FF_max_speed[peaks_idx[start_walk]:peaks_idx[end_walk]+1]
+    FF_walking = FF_walking & ~FF_stand_still_mask
+
+    # Footfall detection based on velocities of the opposite shoe
+    # Compute a footfall region
+    if merge_mode == 'LARGE_SPEED_AND_ORIG':
+        # Uses large speed and original solutions combined
+        FF = FF_orig | FF_max_speed
+    elif merge_mode == 'MAX_SPEED_AND_ORIG':
+        # Uses maximum speed and original solutions combined
+        FF = FF_orig | FF_max_speed
+    elif merge_mode == 'MAX_SPEED_OR_ORIG':
+        # Uses maximum speed as the first option, if it is not available, it will use the original solution
+        # Use original FFs when the person stands still even in the middle of the trial
+        # force a FF at the beginning and end of trial
+        FF = (FF_stand_still_mask & FF_orig) | FF_max_speed
+    elif merge_mode == 'ORIG_UNCOUPLED':
+        # This method will use the same results as foot_fall
+        FF = FF_orig
+    else:
+        raise ValueError(f"Unknown merge mode: {merge_mode}")
+
+    if plot_details:
+        import matplotlib.pyplot as plt
+        plt.figure()
+        plt.plot(Vm)
+        plt.plot(np.where(FF)[0], Vm[FF], 'o', markersize=12,
+                markerfacecolor='k', markeredgecolor='k', label='Foot-fall')
+        plt.plot(np.where(FF_max_speed)[0], Vm[FF_max_speed], 'o', markersize=9,
+                markerfacecolor='g', markeredgecolor='g', label='FF max speed')
+        plt.plot(np.where(FF_orig)[0], Vm[FF_orig], 'o', markersize=6,
+                markerfacecolor='r', markeredgecolor='r', label='FF org')
+        plt.plot(np.where(FF_walking)[0], Vm[FF_walking], 'o', markersize=4,
+                markerfacecolor='y', markeredgecolor='m', label='FF walk')
+        plt.legend()
+
+    return FF, FF_walking, FF_max_speed
+
+
+def compute_pos_two_imus(leftWb: np.ndarray, leftAb: np.ndarray,
+                         rightWb: np.ndarray, rightAb: np.ndarray,
+                         period: float,
+                         USE_KF: int = 1,
+                         W_FF: Optional[float] = None,
+                         A_FF: Optional[float] = None,
+                         FFL: Optional[np.ndarray] = None,
+                         FFR: Optional[np.ndarray] = None,
+                         plot_details: bool = False) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Process data from two IMUs simultaneously (left and right feet).
+
+    This function computes individual foot paths and then refines footfall detection
+    using information from the opposite foot's velocity.
+
+    Parameters:
+    -----------
+    leftWb : np.ndarray
+        Left foot angular velocity (body frame)
+    leftAb : np.ndarray
+        Left foot acceleration (body frame)
+    rightWb : np.ndarray
+        Right foot angular velocity (body frame)
+    rightAb : np.ndarray
+        Right foot acceleration (body frame)
+    period : float
+        Sampling period
+    USE_KF : int, optional
+        Whether to use Kalman filter (default: 1)
+    W_FF : float, optional
+        Angular velocity threshold for footfall detection
+    A_FF : float, optional
+        Acceleration threshold for footfall detection
+    FFL : np.ndarray, optional
+        Pre-computed footfall array for left foot
+    FFR : np.ndarray, optional
+        Pre-computed footfall array for right foot
+    plot_details : bool, optional
+        Whether to create debugging plots (default: False)
+
+    Returns:
+    --------
+    tuple
+        (left_walk_info, right_walk_info) - dictionaries containing walking information
+    """
+    # Compute individual foot paths
+    # Process each foot individually
+    # Left foot
+    left_walk_info = compute_position(leftWb, leftAb, period, USE_KF, W_FF, A_FF, FF=FFL)
+
+    # Right foot
+    right_walk_info = compute_position(rightWb, rightAb, period, USE_KF, W_FF, A_FF, FF=FFR)
+
+    # Verify that both IMUs collected the same amount of information
+    left_samples = len(left_walk_info['FF'])
+    right_samples = len(right_walk_info['FF'])
+    if left_samples != right_samples:
+        raise ValueError(f'Files may not be synced: L = {left_samples}, R = {right_samples}, define a SECTION')
+
+    SAMPLES = left_samples
+    t = np.arange(SAMPLES) * period
+
+    # Merge/Combine previous FF detection with new one based on cross-velocity
+    # Notice that the footfall depends on information of the opposite foot
+    left_walk_info['FF'], left_walk_info['FF_walking'], left_walk_info['FF_max_speed'] = \
+        foot_fall_opposite_velocity(right_walk_info['Vm'], left_walk_info['FF'], period)
+
+    right_walk_info['FF'], right_walk_info['FF_walking'], right_walk_info['FF_max_speed'] = \
+        foot_fall_opposite_velocity(left_walk_info['Vm'], right_walk_info['FF'], period)
+
+    MAX_NUMBER_STEP_DIFF = 2  # Default 2
+    left_ff_count = np.sum(left_walk_info['FF_walking'])
+    right_ff_count = np.sum(right_walk_info['FF_walking'])
+    if abs(left_ff_count - right_ff_count) > MAX_NUMBER_STEP_DIFF:
+        print('Warning! incompatible number of steps, this needs to be fixed.')
+        print('Check MIN_WALK_SPEED in foot_fall_opposite_velocity')
+        print(f'Left: {left_ff_count}, Right: {right_ff_count}')
+
+    # Recompute accelerations (ZUPT) using combined FFs
+    # Left foot
+    An = left_walk_info['An']
+    FF = left_walk_info['FF']
+    Anz = np.zeros((SAMPLES, 3))
+    last_footfall = 0
+    for i in range(1, SAMPLES):
+        last_footfall = zero_velocity_updates(i, FF, An, Anz, last_footfall)
+
+    left_walk_info['Anz'] = Anz
+    left_walk_info['V'] = np.cumsum(Anz, axis=0) * period
+    left_walk_info['P'] = np.cumsum(left_walk_info['V'], axis=0) * period
+    left_walk_info['Vm'] = np.sqrt(np.sum(left_walk_info['V'] ** 2, axis=1))
+
+    # Right foot
+    An = right_walk_info['An']
+    FF = right_walk_info['FF']
+    Anz = np.zeros((SAMPLES, 3))
+    last_footfall = 0
+    for i in range(1, SAMPLES):
+        last_footfall = zero_velocity_updates(i, FF, An, Anz, last_footfall)
+
+    right_walk_info['Anz'] = Anz
+    right_walk_info['V'] = np.cumsum(Anz, axis=0) * period
+    right_walk_info['P'] = np.cumsum(right_walk_info['V'], axis=0) * period
+    right_walk_info['Vm'] = np.sqrt(np.sum(right_walk_info['V'] ** 2, axis=1))
+
+    # Make Plots
+    import matplotlib.pyplot as plt
+
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    ax.plot(left_walk_info['P'][left_walk_info['FF'], 0],
+            left_walk_info['P'][left_walk_info['FF'], 1],
+            left_walk_info['P'][left_walk_info['FF'], 2],
+            '.g', label='left')
+    ax.plot(right_walk_info['P'][right_walk_info['FF'], 0],
+            right_walk_info['P'][right_walk_info['FF'], 1],
+            right_walk_info['P'][right_walk_info['FF'], 2],
+            '.r', label='right')
+    ax.plot(left_walk_info['P'][:, 0],
+            left_walk_info['P'][:, 1],
+            left_walk_info['P'][:, 2], 'b-')
+    ax.plot(right_walk_info['P'][:, 0],
+            right_walk_info['P'][:, 1],
+            right_walk_info['P'][:, 2], 'r-')
+    ax.set_xlabel('X [m]')
+    ax.set_ylabel('Y [m]')
+    ax.set_zlabel('Z [m]')
+    ax.legend()
+    ax.grid(True)
+    plt.axis('equal')
+
+    fig, axes = plt.subplots(2, 1, figsize=(12, 8))
+    axes[0].plot(t, left_walk_info['Vm'])
+    axes[0].plot(t[left_walk_info['FF']], left_walk_info['Vm'][left_walk_info['FF']], 'g*')
+    axes[0].plot(t[left_walk_info['FF_walking']], left_walk_info['Vm'][left_walk_info['FF_walking']], 'k.')
+    axes[0].grid(True)
+    axes[0].set_ylabel('Left |V| [m/s]')
+    axes[0].set_xlabel('time [s]')
+    axes[0].legend(['|V|', 'FFs', 'Walking'])
+    axes[0].set_title('Foot Fall detection using opposite shoe speed')
+
+    axes[1].plot(t, right_walk_info['Vm'])
+    axes[1].plot(t[right_walk_info['FF']], right_walk_info['Vm'][right_walk_info['FF']], 'g*')
+    axes[1].plot(t[right_walk_info['FF_walking']], right_walk_info['Vm'][right_walk_info['FF_walking']], 'k.')
+    axes[1].grid(True)
+    axes[1].set_ylabel('Right |V| [m/s]')
+    axes[1].set_xlabel('time [s]')
+
+    if plot_details:
+        left_az_mag = np.sqrt(np.sum(left_walk_info['Anz'] ** 2, axis=1))
+        right_az_mag = np.sqrt(np.sum(right_walk_info['Anz'] ** 2, axis=1))
+
+        fig, axes = plt.subplots(2, 1, figsize=(12, 8))
+        axes[0].plot(t, left_walk_info['Anz'], t, left_az_mag, 'k')
+        axes[0].plot(t[left_walk_info['FF']], left_walk_info['Vm'][left_walk_info['FF']], 'g.')
+        axes[0].plot(t[left_walk_info['FF_walking']], left_walk_info['Vm'][left_walk_info['FF_walking']], 'yo')
+        axes[0].grid(True)
+        axes[0].set_ylabel('left A [m/s^2]')
+        axes[0].set_xlabel('time [s]')
+
+        axes[1].plot(t, right_walk_info['Anz'], t, right_az_mag, 'k')
+        axes[1].plot(t[right_walk_info['FF']], right_walk_info['Vm'][right_walk_info['FF']], 'g.')
+        axes[1].plot(t[right_walk_info['FF_walking']], right_walk_info['Vm'][right_walk_info['FF_walking']], 'yo')
+        axes[1].grid(True)
+        axes[1].set_ylabel('right A [m/s^2]')
+        axes[1].set_xlabel('time [s]')
+
+    return left_walk_info, right_walk_info

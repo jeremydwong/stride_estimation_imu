@@ -70,145 +70,15 @@ def getdata_apdm(file_path: str, orientation: Optional[int] = None) -> Tuple[np.
     """
     
     with h5py.File(file_path, 'r') as f:
-        # First, let's explore the file structure to understand it better
-        print("Exploring file structure...")
-        
-        def print_all_paths(name, obj):
-            print(f"{name}: {type(obj)}")
-            if isinstance(obj, h5py.Group):
-                for attr_name, attr_value in obj.attrs.items():
-                    print(f"  Attribute '{attr_name}': {attr_value}")
-            elif isinstance(obj, h5py.Dataset):
-                print(f"  Shape: {obj.shape}, Dtype: {obj.dtype}")
-                for attr_name, attr_value in obj.attrs.items():
-                    print(f"  Attribute '{attr_name}': {attr_value}")
-        
-        # Quick exploration (comment out after debugging)
-        f.visititems(print_all_paths) if hasattr(f, 'visititems') else f.visit(lambda name: print_all_paths(name, f[name]))
-        
-        # Read CaseIdList - this might be stored as an attribute or dataset
-        group_name = None
-        
-        # Method 1: Try as a dataset
-        if 'CaseIdList' in f:
-            case_id_obj = f['CaseIdList']
-            if isinstance(case_id_obj, h5py.Dataset):
-                case_id_data = case_id_obj[()]
-                # Handle string encoding
-                if case_id_data.dtype.kind in ['S', 'U', 'O']:
-                    if case_id_data.ndim == 0:
-                        group_name = case_id_data.decode() if hasattr(case_id_data, 'decode') else str(case_id_data)
-                    else:
-                        # Take first element if it's an array
-                        first_item = case_id_data.flat[0]
-                        group_name = first_item.decode() if hasattr(first_item, 'decode') else str(first_item)
-        
-        # Method 2: Try as an attribute
-        if group_name is None and 'CaseIdList' in f.attrs:
-            case_id_attr = f.attrs['CaseIdList']
-            if isinstance(case_id_attr, bytes):
-                group_name = case_id_attr.decode()
-            elif isinstance(case_id_attr, np.ndarray):
-                group_name = case_id_attr[0].decode() if hasattr(case_id_attr[0], 'decode') else str(case_id_attr[0])
-            else:
-                group_name = str(case_id_attr)
-        
-        # Method 3: If still not found, check if it's the first/only group
-        if group_name is None:
-            # Sometimes APDM files have the case ID as the first group name
-            root_keys = list(f.keys())
-            if len(root_keys) == 1:
-                group_name = root_keys[0]
-            else:
-                # Look for a group that's not a standard HDF5 name
-                for key in root_keys:
-                    if not key.startswith('#') and isinstance(f[key], h5py.Group):
-                        group_name = key
-                        break
-        
-        if group_name is None:
-            raise ValueError("Could not find CaseIdList or determine group name")
-        
-        # Clean up group name (remove leading/trailing slashes if present)
-        group_name = group_name.strip('/')
-        
-        # Now find the sample rate - it could be in various places
-        freq = None
-        
-        # Method 1: As a dataset at the expected path
-        sample_rate_path = f'{group_name}/SampleRate'
-        if sample_rate_path in f:
-            freq_data = f[sample_rate_path][()]
-            if isinstance(freq_data, np.ndarray):
-                freq = float(freq_data.flat[0])
-            else:
-                freq = float(freq_data)
-        
-        # Method 2: As an attribute of the group
-        if freq is None and group_name in f:
-            group = f[group_name]
-            if 'SampleRate' in group.attrs:
-                freq = float(group.attrs['SampleRate'])
-            elif 'sampleRate' in group.attrs:  # Try different case
-                freq = float(group.attrs['sampleRate'])
-            elif 'Fs' in group.attrs:  # Common abbreviation
-                freq = float(group.attrs['Fs'])
-        
-        # Method 3: Check in Calibrated subgroup
-        if freq is None:
-            calib_path = f'{group_name}/Calibrated'
-            if calib_path in f:
-                calib_group = f[calib_path]
-                if 'SampleRate' in calib_group.attrs:
-                    freq = float(calib_group.attrs['SampleRate'])
-                elif 'sampleRate' in calib_group.attrs:
-                    freq = float(calib_group.attrs['sampleRate'])
-        
-        # Method 4: Look for it anywhere in the file with a sample rate name
-        if freq is None:
-            def find_sample_rate(name, obj):
-                nonlocal freq
-                if freq is not None:
-                    return
-                
-                # Check if this is a sample rate dataset
-                if any(sr in name.lower() for sr in ['samplerate', 'sample_rate', 'fs', 'frequency']):
-                    if isinstance(obj, h5py.Dataset):
-                        try:
-                            data = obj[()]
-                            if np.isscalar(data) or (isinstance(data, np.ndarray) and data.size == 1):
-                                freq = float(data.flat[0] if isinstance(data, np.ndarray) else data)
-                                print(f"Found sample rate at: {name} = {freq}")
-                        except:
-                            pass
-                
-                # Check attributes
-                if hasattr(obj, 'attrs'):
-                    for attr_name in ['SampleRate', 'sampleRate', 'sample_rate', 'Fs', 'fs', 'frequency']:
-                        if attr_name in obj.attrs:
-                            try:
-                                freq = float(obj.attrs[attr_name])
-                                print(f"Found sample rate as attribute: {name}/{attr_name} = {freq}")
-                                return
-                            except:
-                                pass
-            
-            if hasattr(f, 'visititems'):
-                f.visititems(find_sample_rate)
-            else:
-                f.visit(lambda name: find_sample_rate(name, f[name]))
-        
-        if freq is None:
-            # Last resort - common default sample rates for APDM
-            print("Warning: Could not find sample rate, using default 128 Hz")
-            freq = 128.0
-        
+        l1 = 'Sensors'
+        l2_sensorid = list(f[l1].keys())[0]
+        l_time = f[l1][l2_sensorid]['Time'][()]
+        freq = float(f[l1][l2_sensorid]['Configuration'].attrs['Sample Rate'])
         period = 1.0 / freq
-        
         # Read sensor data (transposed to make Nx3 like MATLAB)
-        accel_path = f'{group_name}/Calibrated/Accelerometers'
-        gyro_path = f'{group_name}/Calibrated/Gyroscopes'
-        mag_path = f'{group_name}/Calibrated/Magnetometers'
+        accel_path = f'{l1}/{l2_sensorid}/Accelerometer'
+        gyro_path = f'{l1}/{l2_sensorid}/Gyroscope'
+        mag_path = f'{l1}/{l2_sensorid}/Magnetometer'
         
         # Read accelerometer data
         if accel_path in f:
@@ -378,4 +248,108 @@ def getdata(Win: np.ndarray, A: np.ndarray, period: float, section_seconds: Opti
     plt.tight_layout()
     plt.show()
     
-    return W, A, static_period, M 
+    return W, A, static_period, M
+
+
+def sync_apdm(l_file: str, r_file: str, sync: bool = True, force_sync_value: int = 0) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Synchronize two APDM sensor files (left and right IMUs).
+
+    Parameters:
+    -----------
+    l_file : str
+        Path to left IMU HDF5 file
+    r_file : str
+        Path to right IMU HDF5 file
+    sync : bool, optional
+        Whether to synchronize the data (default: True)
+    force_sync_value : int, optional
+        Force a specific sync shift value in samples (default: 0)
+
+    Returns:
+    --------
+    tuple
+        (LeftWb, LeftAb, RightWb, RightAb, PERIOD, LeftMb, RightMb, static_period)
+    """
+    import matplotlib.pyplot as plt
+
+    # Read timestamps from both files
+    # COMMENTED OUT - using direct h5py access instead of hdf5read()
+    # with h5py.File(l_file, 'r') as f:
+    #     case_id_list = hdf5read(l_file, '/CaseIdList')
+    #     group_name = case_id_list[0].data
+    #     l_time = hdf5read(l_file, f'{group_name}/Time')
+    #     freq = hdf5read(l_file, f'{group_name}/SampleRate')
+    #     if isinstance(freq, np.ndarray):
+    #         freq = float(freq.flat[0])
+    #     else:
+    #         freq = float(freq)
+    #     period = 1.0 / freq
+    #
+    # with h5py.File(r_file, 'r') as f:
+    #     case_id_list = hdf5read(r_file, '/CaseIdList')
+    #     group_name = case_id_list[0].data
+    #     r_time = hdf5read(r_file, f'{group_name}/Time')
+
+    # Direct h5py.File reading (adapted from getdata_apdm)
+    # Read left file
+    l_time = 0
+    r_time = 0
+    with h5py.File(l_file, 'r') as f:
+        # Find group name (same logic as getdata_apdm lines 89-130)
+        l1 = 'Sensors'
+        l2_sensorid = list(f[l1].keys())[0]
+        l3 = 'Time'
+        l_time = f[l1][l2_sensorid][l3][()]
+        freq = float(f[l1][l2_sensorid]['Configuration'].attrs['Sample Rate'])
+        period = 1.0 / freq
+
+    with h5py.File(l_file, 'r') as f:
+        # Find group name (same logic as getdata_apdm lines 89-130)
+        l1 = 'Sensors'
+        l2_sensorid = list(f[l1].keys())[0]
+        l3 = 'Time'
+        r_time = f[l1][l2_sensorid][l3][()]
+        # freq = float(f[l1][l2_sensorid]['Configuration'].attrs['Sample Rate'])    # well, it would be very bad if it were different than l_file
+        # period = 1.0 / freq                                                       # well, it would be very bad if it were different than l_file
+
+    # Define initial sections (full files)
+    l_section = [1 * period, len(l_time) * period]
+    r_section = [1 * period, len(r_time) * period]
+
+    if sync:
+        if force_sync_value != 0:
+            # If a known value of the time shift is known, use it
+            print('Warning: Sync with user defined value')
+            shift = force_sync_value
+        else:
+            print('Sync with sensor timer')
+            if l_time[0] <= r_time[0]:
+                # Find first index in left that is >= right's first time
+                shift = -(np.where(l_time >= r_time[0])[0][0]+1) #0 to 1 indexing matlab. Converting indices to time.
+            else:
+                # Find first index in right that is >= left's first time
+                shift = np.where(r_time >= l_time[0])[0][0]+1    #0 to 1 as above.
+
+        if shift < 0:
+            print(f'Shift Left IMU signals [{-shift}]')
+            l_section = [-shift * period, len(l_time) * period]
+        else:
+            print(f'Shift Right IMU signals [{shift}]')
+            r_section = [shift * period, len(r_time) * period]
+    else:
+        print('Warning: Not Syncing')
+
+    # Load left IMU data
+    Wb, Ab, period, Mb = getdata_apdm(l_file, 1)
+    LeftWb, LeftAb, static_period, LeftMb = getdata(Wb, Ab, period, [tuple(l_section)], M=Mb)
+    if plt.get_fignums():
+        plt.gcf().canvas.manager.set_window_title('Left IMU')
+
+    # Load right IMU data
+    Wb, Ab, period, Mb = getdata_apdm(r_file, 1)
+    RightWb, RightAb, _, RightMb = getdata(Wb, Ab, period, [tuple(r_section)], M=Mb)
+    if plt.get_fignums():
+        plt.gcf().canvas.manager.set_window_title('Right IMU')
+
+    return LeftWb, LeftAb, RightWb, RightAb, period, LeftMb, RightMb, static_period
