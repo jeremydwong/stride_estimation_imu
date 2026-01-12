@@ -8,6 +8,13 @@ This is a stride estimation system using IMU (Inertial Measurement Unit) data. T
 
 ## Commands
 
+### Conda Environment (Required for Claude)
+Claude Code does not have access to shell profile configurations. Before running any Python commands, activate conda:
+```bash
+source /opt/miniconda3/etc/profile.d/conda.sh
+conda activate stride_estimation_imu
+```
+
 ### Python Environment Setup
 ```bash
 # Install dependencies

@@ -1,8 +1,181 @@
 import numpy as np
-from typing import Tuple, Optional, Any, Dict
+from typing import Tuple, Optional, Any, Dict, List
 from scipy.signal import find_peaks
+from dataclasses import dataclass
 
 GRAVITY = 9.80297286843
+
+
+@dataclass
+class WalkingBout:
+    """A detected walking bout with start/end indices and duration."""
+    start_idx: int
+    end_idx: int
+    duration_seconds: float
+    quiet_before_idx: int  # Start of quiet period before this bout
+    quiet_after_idx: int   # End of quiet period after this bout
+
+
+def detect_quiet_periods(W: np.ndarray, A: np.ndarray, period: float,
+                         W_threshold: float = 30.0,
+                         A_threshold: float = 1.0,
+                         min_quiet_seconds: float = 1.0) -> List[Tuple[int, int]]:
+    """
+    Detect contiguous quiet (stationary) periods in IMU data.
+
+    Parameters:
+    -----------
+    W : np.ndarray
+        Angular velocity (Nx3, rad/sample)
+    A : np.ndarray
+        Acceleration (Nx3, m/s^2)
+    period : float
+        Sampling period in seconds
+    W_threshold : float
+        Max angular velocity magnitude (deg/s) to be considered quiet
+    A_threshold : float
+        Max acceleration deviation from gravity (m/s^2) to be considered quiet
+    min_quiet_seconds : float
+        Minimum duration (seconds) for a quiet period to count
+
+    Returns:
+    --------
+    List[Tuple[int, int]]
+        List of (start_idx, end_idx) for each quiet period
+    """
+    min_quiet_samples = int(min_quiet_seconds / period)
+
+    # Compute magnitudes
+    Wm = np.sqrt(np.sum(W ** 2, axis=1)) * 180 / np.pi / period  # deg/s
+    Am = np.sqrt(np.sum(A ** 2, axis=1))
+    Am_deviation = np.abs(Am - GRAVITY)
+
+    # Find low-motion samples
+    is_quiet = (Wm < W_threshold) & (Am_deviation < A_threshold)
+
+    # Find contiguous quiet regions
+    quiet_periods = []
+    in_quiet = False
+    start_idx = 0
+
+    for i in range(len(is_quiet)):
+        if is_quiet[i] and not in_quiet:
+            # Start of quiet period
+            in_quiet = True
+            start_idx = i
+        elif not is_quiet[i] and in_quiet:
+            # End of quiet period
+            in_quiet = False
+            if i - start_idx >= min_quiet_samples:
+                quiet_periods.append((start_idx, i))
+
+    # Handle case where recording ends during quiet period
+    if in_quiet and len(is_quiet) - start_idx >= min_quiet_samples:
+        quiet_periods.append((start_idx, len(is_quiet)))
+
+    return quiet_periods
+
+
+def detect_walking_bouts(W: np.ndarray, A: np.ndarray, period: float,
+                         W_threshold: float = 30.0,
+                         A_threshold: float = 1.0,
+                         min_quiet_seconds: float = 1.5,
+                         min_walk_seconds: float = 3.0) -> List[WalkingBout]:
+    """
+    Detect walking bouts as active periods between quiet periods.
+
+    A walking bout is an active period bounded by quiet periods on both sides.
+
+    Parameters:
+    -----------
+    W : np.ndarray
+        Angular velocity (Nx3, rad/sample)
+    A : np.ndarray
+        Acceleration (Nx3, m/s^2)
+    period : float
+        Sampling period in seconds
+    W_threshold : float
+        Max angular velocity (deg/s) for quiet detection
+    A_threshold : float
+        Max acceleration deviation from gravity (m/s^2) for quiet detection
+    min_quiet_seconds : float
+        Minimum quiet period duration to count as a boundary
+    min_walk_seconds : float
+        Minimum walking bout duration to include
+
+    Returns:
+    --------
+    List[WalkingBout]
+        List of detected walking bouts
+    """
+    min_walk_samples = int(min_walk_seconds / period)
+
+    quiet_periods = detect_quiet_periods(W, A, period, W_threshold, A_threshold, min_quiet_seconds)
+
+    if len(quiet_periods) < 2:
+        # Need at least 2 quiet periods to bound a walk
+        return []
+
+    bouts = []
+    for i in range(len(quiet_periods) - 1):
+        quiet_end = quiet_periods[i][1]      # End of quiet period before walk
+        quiet_start = quiet_periods[i + 1][0]  # Start of quiet period after walk
+
+        walk_start = quiet_end
+        walk_end = quiet_start
+        walk_samples = walk_end - walk_start
+
+        if walk_samples >= min_walk_samples:
+            bouts.append(WalkingBout(
+                start_idx=walk_start,
+                end_idx=walk_end,
+                duration_seconds=walk_samples * period,
+                quiet_before_idx=quiet_periods[i][0],
+                quiet_after_idx=quiet_periods[i + 1][1]
+            ))
+
+    return bouts
+
+
+def find_bouts_near_time(bouts: List[WalkingBout],
+                         time_datetime: np.ndarray,
+                         target_time,
+                         window_seconds: float = 60.0) -> List[WalkingBout]:
+    """
+    Filter walking bouts to those near a target time.
+
+    Parameters:
+    -----------
+    bouts : List[WalkingBout]
+        List of detected walking bouts
+    time_datetime : np.ndarray
+        Array of datetime objects for each sample
+    target_time : datetime.time
+        Target time of day to search around
+    window_seconds : float
+        Search window in seconds (centered on target_time)
+
+    Returns:
+    --------
+    List[WalkingBout]
+        Bouts that overlap with the time window
+    """
+    half_window = window_seconds / 2
+    target_secs = target_time.hour * 3600 + target_time.minute * 60 + target_time.second
+
+    matching_bouts = []
+    for bout in bouts:
+        # Get time at bout midpoint
+        mid_idx = (bout.start_idx + bout.end_idx) // 2
+        if mid_idx < len(time_datetime):
+            bout_time = time_datetime[mid_idx].time()
+            bout_secs = bout_time.hour * 3600 + bout_time.minute * 60 + bout_time.second + bout_time.microsecond / 1e6
+
+            if abs(bout_secs - target_secs) <= half_window:
+                matching_bouts.append(bout)
+
+    return matching_bouts
+
 
 # --- Quaternion and rotation helpers ---
 def eul2qua(att: np.ndarray) -> np.ndarray:
@@ -39,11 +212,6 @@ def qua2rot(quaternion: np.ndarray) -> np.ndarray:
     R[2, 1] = 2 * (c * d + a * b)
     R[2, 2] = a ** 2 - b ** 2 - c ** 2 + d ** 2
     return R
-
-def rotate_angle(X: np.ndarray, Y: np.ndarray, ang: float) -> Tuple[np.ndarray, np.ndarray]:
-    Xr = X * np.cos(ang) - Y * np.sin(ang)
-    Yr = X * np.sin(ang) + Y * np.cos(ang)
-    return Xr, Yr
 
 # --- Tilt and footfall detection ---
 def acc_tilt(A: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -109,10 +277,10 @@ def kalman_filter_tilt(period: float, quaternion, P, Q, R, accel_theta: Optional
     if is_stationary:
         # compute Kalman gain. 
         K = P/(P+R)
-        euler = qua2eul(quaternion[np.newaxis, :])[0]
-        euler[0] = euler[0] - (euler[0] - accel_phi) * K
-        euler[1] = euler[1] - (euler[1] - accel_theta) * K
-        quaternion = eul2qua(euler[np.newaxis, :])[0]
+        ang = qua2eul(quaternion[np.newaxis, :])[0]
+        ang[0] = ang[0] - (ang[0] - accel_phi) * K
+        ang[1] = ang[1] - (ang[1] - accel_theta) * K
+        quaternion = eul2qua(ang[np.newaxis, :])[0]
         P = (1-K)*P*(1-K) + K*R*K
     return quaternion, P, Q, R
 
@@ -259,8 +427,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy import signal
 
-def rotate_angle(X, Y, ang):
-    """Direct translation of the rotate_angle function"""
+def rotate_angle(X: np.ndarray, Y: np.ndarray, ang: float) -> Tuple[np.ndarray, np.ndarray]:
     Xr = X * np.cos(ang) - Y * np.sin(ang)
     Yr = X * np.sin(ang) + Y * np.cos(ang)
     return Xr, Yr
@@ -800,7 +967,7 @@ def foot_fall_opposite_velocity(Vm: np.ndarray, FF_orig: np.ndarray, period: flo
     return FF, FF_walking, FF_max_speed
 
 
-def compute_pos_two_imus(leftWb: np.ndarray, leftAb: np.ndarray,
+def compute_position_two_imus(leftWb: np.ndarray, leftAb: np.ndarray,
                          rightWb: np.ndarray, rightAb: np.ndarray,
                          period: float,
                          USE_KF: int = 1,
