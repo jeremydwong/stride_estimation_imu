@@ -1,29 +1,154 @@
-# README #
+# Stride Estimation IMU
 
-This README would normally document whatever steps are necessary to get your application up and running.
+A Python library for estimating walking strides and gait parameters from IMU (Inertial Measurement Unit) sensor data.
 
-### What is this repository for? ###
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/jeremydwong/stride_estimation_imu/blob/main/notebooks/demo_colab.ipynb)
 
-* Quick summary
-* Version
-* [Learn Markdown](https://bitbucket.org/tutorials/markdowndemo)
+## Features
 
-### How do I get set up? ###
+- Load and process APDM sensor data from `.h5` files
+- Inertial mechanization: integrate angular velocity and acceleration to compute position
+- Automatic footfall detection during stance phases
+- Zero velocity updates (ZUPT) for drift correction
+- Stride segmentation and gait parameter extraction
+- Walking bout detection using quiet period analysis
+- Multi-IMU synchronization (feet, head, hand)
+- Visualization tools for stride patterns and variability
 
-* Summary of set up
-* Configuration
-* Dependencies
-* Database configuration
-* How to run tests
-* Deployment instructions
+## Installation
 
-### Contribution guidelines ###
+```bash
+# Clone the repository
+git clone git@bitbucket.org:jdwongmcl/stride_estimation_imu.git
+cd stride_estimation_imu
 
-* Writing tests
-* Code review
-* Other guidelines
+# Install dependencies
+pip install -r requirements.txt
+```
 
-### Who do I talk to? ###
+## Quick Start
 
-* Repo owner or admin
-* Other community or team contact
+```python
+import stride_imu as imu
+
+# Load IMU data from APDM .h5 file
+Wb, Ab, PERIOD, _, time_datetime, time_elapsed = imu.getdata_apdm('path/to/sensor.h5')
+
+# Compute position trajectory
+walk_info = imu.compute_position(Wb, Ab, PERIOD)
+
+# Segment strides
+strides = imu.stride_segmentation(walk_info, PERIOD)
+
+# Plot results
+imu.plt_ltrl_frwd_strides(strides)
+imu.plt_stride_var(strides)
+```
+
+## Demos
+
+### Single Foot Analysis (`demo_one_foot.py`)
+
+Basic stride estimation using a single foot-mounted IMU:
+
+```bash
+python demo_one_foot.py
+```
+
+This demo:
+1. Loads IMU data from a single foot sensor
+2. Performs inertial mechanization to compute position
+3. Visualizes the 3D trajectory and stride patterns
+
+### Two Feet + Head Analysis (`demo_two_feet_head.py`)
+
+Comprehensive gait analysis using multiple synchronized IMUs:
+
+```bash
+python demo_two_feet_head.py
+```
+
+This demo:
+1. Loads and synchronizes 4 IMUs (left foot, right foot, head, hand)
+2. Detects walking bouts by finding quiet periods that bound active walking
+3. Interactive bout selection with accelerometer visualization
+4. Computes step metrics (speed, length, duration) for each foot
+5. Analyzes head motion during walking
+6. Generates comparison plots across walking bouts
+7. Caches results for faster re-analysis
+
+## API Reference
+
+### Data Loading (`stride_imu.apdm`)
+
+| Function | Description |
+|----------|-------------|
+| `getdata_apdm(filepath)` | Load raw IMU data from APDM .h5 file |
+| `getdata(filepath, start, end)` | Load and section IMU data with bias correction |
+| `load_imu_recording(filepath)` | Load as `ImuRecording` object |
+| `find_overlapping_recordings(recordings)` | Synchronize multiple IMU recordings |
+| `sync_apdm(files)` | Synchronize multiple APDM files |
+
+### Inertial Processing (`stride_imu.inertial`)
+
+| Function | Description |
+|----------|-------------|
+| `compute_position(Wb, Ab, period)` | Main inertial mechanization pipeline |
+| `compute_position_two_imus(...)` | Process two foot IMUs together |
+| `stride_segmentation(walk_info, period)` | Extract individual strides |
+| `detect_walking_section(walk_info, period)` | Find walking vs stationary periods |
+| `detect_walking_bouts(Wb, Ab, period)` | Detect walking bouts using quiet periods |
+| `detect_quiet_periods(Wb, Ab, period)` | Find stationary periods |
+| `find_bouts_near_time(bouts, time, target)` | Find bouts near a target time |
+
+### Visualization (`stride_imu.plotting`)
+
+| Function | Description |
+|----------|-------------|
+| `plt_ltrl_frwd_strides(strides)` | Plot lateral vs forward stride trajectories |
+| `plt_frwd_elev_strides(strides)` | Plot forward vs elevation stride trajectories |
+| `plt_stride_var(strides)` | Plot stride variability ellipse (2D Gaussian) |
+| `plt_walk_info_position(walk_info)` | 3D plot of position trajectory |
+
+### Data Structures
+
+**`ImuRecording`**: Container for synchronized IMU data
+- `Wb`: Angular velocity (rad/sample)
+- `Ab`: Acceleration (m/s^2)
+- `time_datetime`: Timestamps as datetime objects
+- `period`: Sampling period (seconds)
+
+**`WalkingBout`**: Detected walking segment
+- `start_idx`, `end_idx`: Sample indices
+- `duration_seconds`: Bout duration
+- `quiet_before_idx`, `quiet_after_idx`: Bounding quiet periods
+
+## Google Colab
+
+To run in Google Colab:
+
+1. Click the "Open in Colab" badge above (requires GitHub mirror), or
+2. Upload the notebook manually:
+   - Download `notebooks/demo_colab.ipynb` from this repository
+   - Go to [Google Colab](https://colab.research.google.com/)
+   - File > Upload notebook
+   - Upload your IMU `.h5` files to the Colab runtime
+
+**Note**: The Colab badge requires the repository to be mirrored to GitHub. See instructions below.
+
+### Setting up GitHub Mirror for Colab
+
+The repository is already mirrored at https://github.com/jeremydwong/stride_estimation_imu
+
+To sync future changes:
+```bash
+git push github main
+```
+
+## License
+
+[Add your license here]
+
+## Contact
+
+[Add contact information here]
