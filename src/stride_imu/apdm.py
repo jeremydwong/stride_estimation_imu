@@ -179,7 +179,8 @@ def slice_from_time_recording(recording: ImuRecording,
         period=recording.period,
         Mb=recording.Mb[indices, :] if recording.Mb is not None else None,
         raw_time=recording.raw_time[indices] if recording.raw_time is not None else None,
-        file_path=recording.file_path
+        file_path=recording.file_path,
+        tz_offset_hours=recording.tz_offset_hours,
     )
 
 
@@ -276,13 +277,71 @@ def hdf5read(file_path: str, dataset_name: str) -> Union[np.ndarray, Any]:
         return data
 
 
-import h5py
-import numpy as np
-from typing import Optional, Tuple
+def _apply_orientation(w: np.ndarray, a: np.ndarray, m: np.ndarray,
+                       period: float, orientation: Optional[int] = None
+                       ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Apply APDM sensor orientation transform.
 
-import h5py
-import numpy as np
-from typing import Optional, Tuple
+    Parameters:
+    -----------
+    w : np.ndarray
+        Raw gyroscope data (Nx3)
+    a : np.ndarray
+        Raw accelerometer data (Nx3)
+    m : np.ndarray
+        Raw magnetometer data (Nx3)
+    period : float
+        Sampling period in seconds (used to scale angular velocity to rad/sample)
+    orientation : int, optional
+        Orientation code (default: LED_UP_RIGHT_FRWD = 1)
+
+    Returns:
+    --------
+    Tuple[np.ndarray, np.ndarray, np.ndarray]
+        (W, A, M) — angular velocity (rad/sample), acceleration (m/s^2), magnetometer
+    """
+    # Orientation constants (matching MATLAB exactly)
+    ORIGINAL = 0
+    LED_UP_RIGHT_FRWD = 1  # This one is normally used on feet
+    LED_UP_LEFT_FRWD = 2
+    LED_LOW_RIGHT_FRWD = 3
+    LED_LOW_DOWN_FRWD = 4
+    LED_UP_RIGHT_BACK = 5
+    LED_LOW_LEFT_BACK = 6
+
+    if orientation is None:
+        orientation = LED_UP_RIGHT_FRWD
+
+    if orientation == ORIGINAL:
+        WX, WY, WZ = w[:, 0], w[:, 1], w[:, 2]
+        AX, AY, AZ = a[:, 0], a[:, 1], a[:, 2]
+    elif orientation == LED_UP_RIGHT_FRWD:
+        WX, WY, WZ = w[:, 1], w[:, 0], -w[:, 2]
+        AX, AY, AZ = a[:, 1], a[:, 0], -a[:, 2]
+    elif orientation == LED_UP_LEFT_FRWD:
+        WX, WY, WZ = w[:, 0], -w[:, 1], -w[:, 2]
+        AX, AY, AZ = a[:, 0], -a[:, 1], -a[:, 2]
+    elif orientation == LED_LOW_DOWN_FRWD:
+        WX, WY, WZ = -w[:, 1], -w[:, 0], -w[:, 2]
+        AX, AY, AZ = -a[:, 1], -a[:, 0], -a[:, 2]
+    elif orientation == LED_LOW_RIGHT_FRWD:
+        WX, WY, WZ = -w[:, 0], w[:, 1], -w[:, 2]
+        AX, AY, AZ = -a[:, 0], a[:, 1], -a[:, 2]
+    elif orientation == LED_UP_RIGHT_BACK:
+        WX, WY, WZ = w[:, 2], -w[:, 0], w[:, 1]
+        AX, AY, AZ = a[:, 2], -a[:, 0], a[:, 1]
+    elif orientation == LED_LOW_LEFT_BACK:
+        WX, WY, WZ = w[:, 2], w[:, 0], -w[:, 1]
+        AX, AY, AZ = a[:, 2], a[:, 0], -a[:, 1]
+    else:
+        raise ValueError('Unknown orientation')
+
+    W = np.column_stack([WX, WY, WZ]) * period
+    A = np.column_stack([AX, AY, AZ])
+    M = m
+
+    return W, A, M
+
 
 def getdata_apdm(file_path: str, orientation: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray, float, np.ndarray, np.ndarray, np.ndarray, Optional[float]]:
     """
@@ -347,47 +406,8 @@ def getdata_apdm(file_path: str, orientation: Optional[int] = None) -> Tuple[np.
     time_datetime = apdm_time_to_datetime(l_time, tz_offset_hours)
     time_elapsed_samples = np.arange(len(l_time))
 
-    # Orientation constants (matching MATLAB exactly)
-    ORIGINAL = 0
-    LED_UP_RIGHT_FRWD = 1  # This one is normally used on feet
-    LED_UP_LEFT_FRWD = 2
-    LED_LOW_RIGHT_FRWD = 3
-    LED_LOW_DOWN_FRWD = 4
-    LED_UP_RIGHT_BACK = 5
-    LED_LOW_LEFT_BACK = 6
-    
-    if orientation is None:
-        orientation = LED_UP_RIGHT_FRWD
-    
-    # Apply orientation transformation (exactly matching MATLAB switch statement)
-    if orientation == ORIGINAL:
-        WX, WY, WZ = w[:, 0], w[:, 1], w[:, 2]
-        AX, AY, AZ = a[:, 0], a[:, 1], a[:, 2]
-    elif orientation == LED_UP_RIGHT_FRWD:
-        WX, WY, WZ = w[:, 1], w[:, 0], -w[:, 2]
-        AX, AY, AZ = a[:, 1], a[:, 0], -a[:, 2]
-    elif orientation == LED_UP_LEFT_FRWD:
-        WX, WY, WZ = w[:, 0], -w[:, 1], -w[:, 2]
-        AX, AY, AZ = a[:, 0], -a[:, 1], -a[:, 2]
-    elif orientation == LED_LOW_DOWN_FRWD:
-        WX, WY, WZ = -w[:, 1], -w[:, 0], -w[:, 2]
-        AX, AY, AZ = -a[:, 1], -a[:, 0], -a[:, 2]
-    elif orientation == LED_LOW_RIGHT_FRWD:
-        WX, WY, WZ = -w[:, 0], w[:, 1], -w[:, 2]
-        AX, AY, AZ = -a[:, 0], a[:, 1], -a[:, 2]
-    elif orientation == LED_UP_RIGHT_BACK:
-        WX, WY, WZ = w[:, 2], -w[:, 0], w[:, 1]
-        AX, AY, AZ = a[:, 2], -a[:, 0], a[:, 1]
-    elif orientation == LED_LOW_LEFT_BACK:
-        WX, WY, WZ = w[:, 2], w[:, 0], -w[:, 1]
-        AX, AY, AZ = a[:, 2], a[:, 0], -a[:, 1]
-    else:
-        raise ValueError('Unknown orientation')
-    
-    # Assemble final outputs (matching MATLAB exactly)
-    W = np.column_stack([WX, WY, WZ]) * period
-    A = np.column_stack([AX, AY, AZ])
-    M = m
+    # Apply orientation transformation
+    W, A, M = _apply_orientation(w, a, m, period, orientation)
 
     return W, A, period, M, time_datetime, time_elapsed_samples, tz_offset_hours
 
@@ -527,8 +547,11 @@ def getdata(Win: np.ndarray, A: np.ndarray, period: float, section_seconds: Opti
 
 
 def load_imu_recording(file_path: str, orientation: Optional[int] = None) -> ImuRecording:
-    """
-    Load an APDM HDF5 file into an ImuRecording.
+    """Primary API for loading APDM sensor data from an HDF5 file.
+
+    Opens the file once, reads all sensor channels (accelerometer, gyroscope,
+    magnetometer), timestamps, sampling rate, and timezone offset, applies the
+    orientation transform, and returns a fully populated ImuRecording.
 
     Parameters:
     -----------
@@ -540,15 +563,48 @@ def load_imu_recording(file_path: str, orientation: Optional[int] = None) -> Imu
     Returns:
     --------
     ImuRecording
-        IMU recording with all sensor data
+        IMU recording with all sensor data and metadata
     """
-    # Read raw time for sync purposes
     with h5py.File(file_path, 'r') as f:
         l1 = 'Sensors'
         l2_sensorid = list(f[l1].keys())[0]
         raw_time = np.asarray(f[l1][l2_sensorid]['Time'][()])  # type: ignore[index]
+        freq = float(f[l1][l2_sensorid]['Configuration'].attrs['Sample Rate'])
+        period = 1.0 / freq
 
-    W, A, period, M, time_datetime, time_elapsed_samples, tz_offset_hours = getdata_apdm(file_path, orientation)
+        # Read timezone offset from sensor configuration if available
+        config = f[l1][l2_sensorid]['Configuration']
+        if 'Timezone Offset' in config.attrs:
+            tz_offset_hours = float(config.attrs['Timezone Offset'])
+        else:
+            tz_offset_hours = None
+
+        # Read sensor data
+        accel_path = f'{l1}/{l2_sensorid}/Accelerometer'
+        gyro_path = f'{l1}/{l2_sensorid}/Gyroscope'
+        mag_path = f'{l1}/{l2_sensorid}/Magnetometer'
+
+        if accel_path in f:
+            a = f[accel_path][()]
+        else:
+            raise ValueError(f"Accelerometer data not found at {accel_path}")
+
+        if gyro_path in f:
+            w = f[gyro_path][()]
+        else:
+            raise ValueError(f"Gyroscope data not found at {gyro_path}")
+
+        if mag_path in f:
+            m = f[mag_path][()]
+        else:
+            raise ValueError(f"Magnetometer data not found at {mag_path}")
+
+    # Apply orientation transform
+    W, A, M = _apply_orientation(w, a, m, period, orientation)
+
+    # Convert timestamps
+    time_datetime = apdm_time_to_datetime(raw_time, tz_offset_hours)
+    time_elapsed_samples = np.arange(len(raw_time))
 
     return ImuRecording(
         Wb=W,

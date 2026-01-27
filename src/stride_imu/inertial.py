@@ -234,7 +234,7 @@ def foot_fall(W: np.ndarray, A: np.ndarray, period: float, W_FF: Optional[float]
     else:
         T_FF = int(T_FF / period)
     if MAX_T_FF is None:
-        MAX_T_FF = T_FF * 3
+        MAX_T_FF = T_FF * 10
     else:
         MAX_T_FF = int(MAX_T_FF / period)
     Wm = np.sqrt(np.sum(W ** 2, axis=1)) * 180 / np.pi / period
@@ -316,20 +316,42 @@ def zero_velocity_updates(i: int, FF: np.ndarray, An: np.ndarray, Anz: np.ndarra
 
 
 def compute_position(W: np.ndarray, A: np.ndarray, period: float, USE_KF: int = 1, W_FF: Optional[float] = None, A_FF: Optional[float] = None, T_FF: Optional[float] = None, MAX_T_FF: Optional[float] = None, FF: Optional[np.ndarray] = None) -> Dict[str, Any]:
-    """
-    compute_position(W, A, period, USE_KF=1, W_FF=None, A_FF=None, T_FF=None, MAX_T_FF=None,FF=None)
-    
+    """Perform inertial mechanization on a single foot IMU recording.
+
+    Integrates angular velocity to track orientation (as quaternions),
+    transforms body-frame accelerations to the navigation frame, detects
+    footfalls (stance phases), and applies zero-velocity updates (ZUPT) to
+    correct drift. Returns a dict containing position trajectory, velocity,
+    orientation, and footfall arrays.
+
     Parameters:
     -----------
-    W: np.ndarray,                                          # gyro
-    A: np.ndarray,                                          # accelerometer
-    period: float,                                          # usually 1/128
-    USE_KF: int = 1,                                        # we always want to use the kalman filter
-    W_FF: Optional[float] = None,                           # 
-    A_FF: Optional[float] = None, 
-    T_FF: Optional[float] = None, 
-    MAX_T_FF: Optional[float] = None, 
-    FF: Optional[np.ndarray] = None) -> Dict[str, Any]:
+    W : np.ndarray
+        Angular velocity in body frame (Nx3, rad/sample)
+    A : np.ndarray
+        Acceleration in body frame (Nx3, m/s^2)
+    period : float
+        Sampling period in seconds (e.g. 1/128)
+    USE_KF : int
+        Use Kalman filter for tilt correction (default: 1, always on)
+    W_FF : float, optional
+        Angular velocity threshold for footfall detection (deg/s)
+    A_FF : float, optional
+        Acceleration threshold for footfall detection (m/s^2)
+    T_FF : float, optional
+        Minimum time between footfalls (seconds)
+    MAX_T_FF : float, optional
+        Maximum footfall segment duration (seconds)
+    FF : np.ndarray, optional
+        Pre-computed footfall boolean array (skips detection if provided)
+
+    Returns:
+    --------
+    dict
+        Keys: 'P' (position Nx3), 'V' (velocity Nx3), 'Vm' (speed magnitude),
+        'FF' (footfall bool array), 'FF_walking' (walking-only footfalls),
+        'euler' (orientation Nx3), 'quaternion' (Nx4),
+        'An' (nav-frame accel), 'Anz' (ZUPT-corrected accel), 'A', 'W'
     """
     
     N = W.shape[0]
@@ -376,17 +398,23 @@ def compute_position(W: np.ndarray, A: np.ndarray, period: float, USE_KF: int = 
     return result
 
 def detect_walking_section(walk_info: Dict[str, Any], MIN_WALK_SPEED: float = 2.0) -> np.ndarray:
-    
-    """
-    detect_walking_section(walk_info: Dict[str, Any], MIN_WALK_SPEED: float = 2.0) -> np.ndarray:
-    
+    """Filter footfalls to only the walking portion of a recording.
+
+    Uses velocity magnitude peaks to identify the region of sustained walking,
+    excluding stationary periods at the start and end. Called internally by
+    compute_position() to populate the 'FF_walking' key.
+
     Parameters:
     -----------
-    walk_info : Dict[str,Any] 
-    MIN_WALK_SPEED : float = 2.0
+    walk_info : dict
+        Output of compute_position() (must contain 'FF' and 'Vm' keys)
+    MIN_WALK_SPEED : float
+        Minimum peak velocity to count as walking (default: 2.0 m/s)
 
-    Filter the detected footfalls in walk_info [FF] based on foot velocity
-    Also filter out steps where 
+    Returns:
+    --------
+    np.ndarray
+        Boolean footfall array for the walking section only
     """   
     FF = np.where(walk_info['FF'])[0]
     Vm = walk_info['Vm']
@@ -404,6 +432,32 @@ def detect_walking_section(walk_info: Dict[str, Any], MIN_WALK_SPEED: float = 2.
         return FF_walking
 
 def stride_segmentation(walk_info: Dict[str, Any], period: float, FILTER: int = 0, OUTLIER_SECTION_SECONDS: Optional[Any] = None) -> Dict[str, Any]:
+    """Segment individual strides from a processed walking recording.
+
+    Takes the output of compute_position() and identifies individual stride
+    cycles using the FF_walking footfall array. Each stride runs from one
+    footfall to the next. Strides are rotated to a local forward/lateral
+    coordinate frame and metrics (speed, length, duration) are computed.
+
+    Parameters:
+    -----------
+    walk_info : dict
+        Output of compute_position()
+    period : float
+        Sampling period in seconds
+    FILTER : int
+        If 1, apply outlier filtering to remove abnormal strides (default: 0)
+    OUTLIER_SECTION_SECONDS : optional
+        Time ranges (seconds) to exclude as outliers
+
+    Returns:
+    --------
+    dict
+        Keys: 'frwd' (forward trajectory per stride), 'ltrl' (lateral),
+        'elev' (elevation), 'frwd_speed', 'time', 'step_samples',
+        'foot_heading', 'frwd_swing', 'ltrl_swing', 'abs_frwd', 'abs_ltrl',
+        'theta', 'start_end', 'diff_foot_heading', 'frwd_speed_compensated'
+    """
     if OUTLIER_SECTION_SECONDS is not None:
         number_of_sections = np.atleast_2d(OUTLIER_SECTION_SECONDS).shape[0]
         OUTLIER_SECTION_SAMPLES = np.concatenate([
@@ -421,6 +475,8 @@ def stride_segmentation(walk_info: Dict[str, Any], period: float, FILTER: int = 
     swing_start = np.delete(swing_start, too_long)
     swing_finish = np.delete(swing_finish, too_long)
     stepData = get_steps(swing_start, swing_finish, walk_info, period, FILTER, OUTLIER_SECTION_SAMPLES)
+    # display stepData
+    print("Detected {} steps after segmentation.".format(len(swing_start)))
     return stepData
 
 import numpy as np
@@ -435,7 +491,7 @@ def rotate_angle(X: np.ndarray, Y: np.ndarray, ang: float) -> Tuple[np.ndarray, 
 def get_steps(step_start, step_end, walk_info, PERIOD, FILTER, OUTLIER_SECTION, verbose=False):
     """
     get_steps(step_start, step_end,walk_info,PERIOD,FILTER,OUTLIER_SECTION,verbose=Fals)
-    
+
     Parameters:
     -----------
     step_start : array-like
@@ -452,19 +508,46 @@ def get_steps(step_start, step_end, walk_info, PERIOD, FILTER, OUTLIER_SECTION, 
         Indices of outlier sections to remove
     verbose : bool, optional
         Whether to plot details (default: False)
+
+    Returns:
+    --------
+    dict
+        Dictionary containing stride metrics. If no steps are detected, returns
+        a dict with empty arrays for all fields.
     """
     PLOT_DETAILS = verbose
-    
+
+    # Handle case when no steps are detected
+    step_start = np.array(step_start).reshape(-1, 1).flatten()
+    step_end = np.array(step_end).reshape(-1, 1).flatten()
+
+    if len(step_start) == 0 or len(step_end) == 0:
+        # Return empty result structure
+        return {
+            'frwd_swing': np.array([]).reshape(0, 0),
+            'ltrl_swing': np.array([]).reshape(0, 0),
+            'frwd': np.array([]).reshape(0, 0),
+            'ltrl': np.array([]).reshape(0, 0),
+            'abs_ltrl': np.array([]).reshape(0, 0),
+            'abs_frwd': np.array([]).reshape(0, 0),
+            'elev': np.array([]).reshape(0, 0),
+            'theta': np.array([]).reshape(0, 0),
+            'start_end': np.array([]).reshape(0, 0),
+            'foot_heading': np.array([]),
+            'diff_foot_heading': np.array([]),
+            'step_samples': np.array([]),
+            'time': np.array([]),
+            'frwd_speed_compensated': np.array([]),
+            'frwd_speed': np.array([])
+        }
+
     # DIRECTION_STEPS, determine the number of steps before and after current one, used to define a straight segment
     DIRECTION_STEPS = 3  # default 3
     # mean_step_direction = 0  # when DIRECTION_STEPS is 0, uncomment this
     
     EXTRA_FRWD_CORRECTION = 1  # default is 1. This will straighten the paths perfectly
     # EXTRA_FRWD_CORRECTION = 0  # for hand reaching Oct 2023
-    
-    # Ensure column vectors
-    step_start = np.array(step_start).reshape(-1, 1).flatten()
-    step_end = np.array(step_end).reshape(-1, 1).flatten()
+
     number_of_steps = len(step_start)
     longest_step = np.max(step_end - step_start) + 1
     
@@ -545,9 +628,9 @@ def get_steps(step_start, step_end, walk_info, PERIOD, FILTER, OUTLIER_SECTION, 
             if i > DIRECTION_STEPS and number_of_steps - i > DIRECTION_STEPS:
                 nearby_steps_index = np.arange(i - DIRECTION_STEPS, i + DIRECTION_STEPS + 1)
             elif i <= DIRECTION_STEPS:
-                nearby_steps_index = np.arange(0, i + DIRECTION_STEPS + 1)
+                nearby_steps_index = np.arange(0, min(i + DIRECTION_STEPS + 1, number_of_steps))
             else:
-                nearby_steps_index = np.arange(i - DIRECTION_STEPS, len(step_start))
+                nearby_steps_index = np.arange(i - DIRECTION_STEPS, number_of_steps)
             
             # Find local direction of travel
             nearby_steps = step_start[nearby_steps_index]
@@ -656,7 +739,7 @@ def get_steps(step_start, step_end, walk_info, PERIOD, FILTER, OUTLIER_SECTION, 
     
     # Check for negative values in frwd
     if np.any(frwd[:, -1] < 0):
-        print('OSMAN NEGATIVE IN FRWRD')
+        print('WARNING: NEGATIVE IN FORWARD DIRECTION DETECTED IN STEPS!')
         frwd = np.abs(frwd)
     
     # Compute step speed
@@ -976,11 +1059,11 @@ def compute_position_two_imus(leftWb: np.ndarray, leftAb: np.ndarray,
                          FFL: Optional[np.ndarray] = None,
                          FFR: Optional[np.ndarray] = None,
                          plot_details: bool = False) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """
-    Process data from two IMUs simultaneously (left and right feet).
+    """Process two synchronized foot IMUs together.
 
-    This function computes individual foot paths and then refines footfall detection
-    using information from the opposite foot's velocity.
+    Runs compute_position() on each foot independently, then re-detects
+    footfalls with tuned parameters and recomputes ZUPT-corrected velocities
+    and positions. Produces diagnostic plots of both feet.
 
     Parameters:
     -----------
@@ -1031,11 +1114,17 @@ def compute_position_two_imus(leftWb: np.ndarray, leftAb: np.ndarray,
 
     # Merge/Combine previous FF detection with new one based on cross-velocity
     # Notice that the footfall depends on information of the opposite foot
-    left_walk_info['FF'], left_walk_info['FF_walking'], left_walk_info['FF_max_speed'] = \
-        foot_fall_opposite_velocity(right_walk_info['Vm'], left_walk_info['FF'], period)
+    # left_walk_info['FF'], left_walk_info['FF_walking'], left_walk_info['FF_max_speed'] = \
+    #     foot_fall_opposite_velocity(right_walk_info['Vm'], left_walk_info['FF'], period)
 
-    right_walk_info['FF'], right_walk_info['FF_walking'], right_walk_info['FF_max_speed'] = \
-        foot_fall_opposite_velocity(left_walk_info['Vm'], right_walk_info['FF'], period)
+    # right_walk_info['FF'], right_walk_info['FF_walking'], right_walk_info['FF_max_speed'] = \
+    #     foot_fall_opposite_velocity(left_walk_info['Vm'], right_walk_info['FF'], period)
+    left_walk_info['FF'],left_walk_info['stationary_periods'] = foot_fall(leftWb, leftAb, period, W_FF=30, A_FF=1, T_FF=.4, MAX_T_FF=10)
+    # duplicate for FF_walking
+    left_walk_info['FF_walking'] = left_walk_info['FF'].copy()
+    right_walk_info['FF'], right_walk_info['stationary_periods'] = foot_fall(rightWb, rightAb, period, W_FF=30, A_FF=1, T_FF=.4, MAX_T_FF=10)
+    # duplicate for FF_walking
+    right_walk_info['FF_walking'] = right_walk_info['FF'].copy()
 
     MAX_NUMBER_STEP_DIFF = 2  # Default 2
     left_ff_count = np.sum(left_walk_info['FF_walking'])

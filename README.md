@@ -2,7 +2,9 @@
 
 A Python library for estimating walking strides and gait parameters from IMU (Inertial Measurement Unit) sensor data.
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/jeremydwong/stride_estimation_imu/blob/main/notebooks/demo_colab.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/jeremydwong/stride_estimation_imu/blob/main/notebooks/demo_colab_one_foot.ipynb) Single Foot Demo
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/jeremydwong/stride_estimation_imu/blob/main/notebooks/demo_colab_two_feet_head_exphand.ipynb) Two Feet + Head Demo
 
 ## Features
 
@@ -19,7 +21,7 @@ A Python library for estimating walking strides and gait parameters from IMU (In
 
 ```bash
 # Clone the repository
-git clone git@bitbucket.org:jdwongmcl/stride_estimation_imu.git
+git clone https://github.com/jeremydwong/stride_estimation_imu.git
 cd stride_estimation_imu
 
 # Install dependencies
@@ -30,15 +32,16 @@ pip install -r requirements.txt
 
 ```python
 import stride_imu as imu
+from stride_imu.apdm import load_imu_recording
 
 # Load IMU data from APDM .h5 file
-Wb, Ab, PERIOD, _, time_datetime, time_elapsed = imu.getdata_apdm('path/to/sensor.h5')
+recording = load_imu_recording('path/to/sensor.h5')
 
 # Compute position trajectory
-walk_info = imu.compute_position(Wb, Ab, PERIOD)
+walk_info = imu.compute_position(recording.Wb, recording.Ab, recording.period)
 
 # Segment strides
-strides = imu.stride_segmentation(walk_info, PERIOD)
+strides = imu.stride_segmentation(walk_info, recording.period)
 
 # Plot results
 imu.plt_ltrl_frwd_strides(strides)
@@ -83,9 +86,7 @@ This demo:
 
 | Function | Description |
 |----------|-------------|
-| `getdata_apdm(filepath)` | Load raw IMU data from APDM .h5 file |
-| `getdata(filepath, start, end)` | Load and section IMU data with bias correction |
-| `load_imu_recording(filepath)` | Load as `ImuRecording` object |
+| `load_imu_recording(filepath)` | Load APDM .h5 file as an `ImuRecording` object |
 | `find_overlapping_recordings(recordings)` | Synchronize multiple IMU recordings |
 | `sync_apdm(files)` | Synchronize multiple APDM files |
 
@@ -117,6 +118,7 @@ This demo:
 - `Ab`: Acceleration (m/s^2)
 - `time_datetime`: Timestamps as datetime objects
 - `period`: Sampling period (seconds)
+- `tz_offset_hours`: UTC offset from sensor config (e.g., -6.0 for MDT)
 
 **`WalkingBout`**: Detected walking segment
 - `start_idx`, `end_idx`: Sample indices

@@ -1,14 +1,12 @@
 # __init__.py
 
-
 from .apdm import (
-    getdata, getdata_apdm, sync_apdm,
     ImuRecording, load_imu_recording, find_overlapping_recordings, load_overlapping_recordings
 )
 
 from .inertial import (
-    compute_position, stride_segmentation, detect_walking_section, compute_position_two_imus,
-    WalkingBout, detect_quiet_periods, detect_walking_bouts, find_bouts_near_time
+    WalkingBout, detect_quiet_periods, detect_walking_section, compute_position, stride_segmentation, compute_position_two_imus,
+    detect_walking_bouts, find_bouts_near_time
 )
 
 from .plotting import (
