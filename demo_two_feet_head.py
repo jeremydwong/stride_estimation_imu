@@ -32,39 +32,6 @@ from stride_imu.inertial import (
     WalkingBout
 )
 
-# =============================================================================
-# File paths
-# =============================================================================
-HEAD_FILE = '/Users/jeremy/Library/CloudStorage/OneDrive-UniversityofCalgary/Project 2025 CC Balance/Pilot testing/January 5th Pilot Testing/20260105-141716_Head_013120.h5'
-LEFT_FILE = '/Users/jeremy/Library/CloudStorage/OneDrive-UniversityofCalgary/Project 2025 CC Balance/Pilot testing/January 5th Pilot Testing/20260105-141714_LeftFoot_013087.h5'
-RIGHT_FILE = '/Users/jeremy/Library/CloudStorage/OneDrive-UniversityofCalgary/Project 2025 CC Balance/Pilot testing/January 5th Pilot Testing/20260105-141717_RightFoot_013097.h5'
-HAND_FILE = '/Users/jeremy/Library/CloudStorage/OneDrive-UniversityofCalgary/Project 2025 CC Balance/Pilot testing/January 5th Pilot Testing/20260105-141719_Hand_013056.h5'
-
-# Cache file location (same directory as head file)
-CACHE_DIR = Path(HEAD_FILE).parent
-CACHE_FILE = CACHE_DIR / 'cached_analysis.pkl'
-
-# =============================================================================
-# Walking bout target times (January 5, 2026)
-# Each tuple: (name, target_time, search_window_seconds)
-# The script will find walking bouts (bounded by quiet periods) near these times
-# =============================================================================
-WALKING_BOUT_TARGETS = [
-    ('7m walk', dt_time(15, 0, 0), 120),      # 3:00 PM
-    ('5m walk', dt_time(14, 59, 0), 120),     # 2:59 PM
-    ('20m walk', dt_time(15, 8, 0), 120),     # 3:08 PM
-    ('15m walk', dt_time(15, 9, 0), 120),     # 3:09 PM
-    ('track 2 laps', dt_time(15, 12, 0), 180),  # 3:11 PM
-]
-
-# =============================================================================
-# Bout detection parameters
-# =============================================================================
-MIN_QUIET_SECONDS = 1.5   # Minimum quiet period to count as walk boundary
-MIN_WALK_SECONDS = 3.0    # Minimum walking duration to include
-W_THRESHOLD = 30.0        # Max angular velocity (deg/s) for quiet detection
-A_THRESHOLD = 1.0         # Max accel deviation from gravity (m/s^2) for quiet
-
 
 class BoutSelection:
     """Stores bout selection with precise timing info for caching."""
@@ -255,10 +222,29 @@ def plot_rotation_corrected_trajectories(left_walk_info: dict, right_walk_info: 
 
 
 def compute_step_metrics(strides: dict) -> dict:
-    """Compute step-level metrics from stride segmentation output."""
-    step_lengths = strides['frwd'][-1, :]
-    step_durations = strides['time']
+    """Compute step-level metrics from stride segmentation output.
+
+    Handles empty strides (no steps detected) by returning zeros/empty arrays.
+    """
     step_speeds = strides['frwd_speed']
+    step_durations = strides['time']
+
+    # Handle empty strides (no steps detected)
+    if len(step_speeds) == 0:
+        return {
+            'step_lengths': np.array([]),
+            'step_durations': np.array([]),
+            'step_speeds': np.array([]),
+            'mean_speed': 0.0,
+            'std_speed': 0.0,
+            'mean_length': 0.0,
+            'std_length': 0.0,
+            'mean_duration': 0.0,
+            'std_duration': 0.0,
+            'n_steps': 0
+        }
+
+    step_lengths = strides['frwd'][-1, :]
 
     return {
         'step_lengths': step_lengths,
@@ -654,8 +640,18 @@ def plot_bout_summary(bout_name: str, left_metrics: dict, right_metrics: dict,
     ax.grid(True, axis='y')
 
     ax = axes[1, 0]
-    ax.hist(left_metrics['step_speeds'], bins=15, alpha=0.5, label='Left', color='blue')
-    ax.hist(right_metrics['step_speeds'], bins=15, alpha=0.5, label='Right', color='red')
+    # Compute shared bin edges for comparable histograms
+    all_speeds = []
+    if left_metrics['n_steps'] > 0:
+        all_speeds.extend(left_metrics['step_speeds'])
+    if right_metrics['n_steps'] > 0:
+        all_speeds.extend(right_metrics['step_speeds'])
+    if all_speeds:
+        bins = np.linspace(min(all_speeds), max(all_speeds), 46)  # 45 bins = 46 edges
+        if left_metrics['n_steps'] > 0:
+            ax.hist(left_metrics['step_speeds'], bins=bins, alpha=0.5, label='Left', color='blue')
+        if right_metrics['n_steps'] > 0:
+            ax.hist(right_metrics['step_speeds'], bins=bins, alpha=0.5, label='Right', color='red')
     ax.set_xlabel('Step Speed [m/s]')
     ax.set_ylabel('Count')
     ax.set_title('Step Speed Distribution')
@@ -689,7 +685,62 @@ if __name__ == '__main__':
     print("Loading and synchronizing all IMU recordings...")
     print("=" * 60)
 
-    # Check for cached data
+    # =============================================================================
+    # File paths
+    # =============================================================================
+    HEAD_FILE = '/Users/jeremy/Library/CloudStorage/OneDrive-UniversityofCalgary/Project 2025 CC Balance/Pilot testing/January 5th Pilot Testing/20260105-141716_Head_013120.h5'
+    LEFT_FILE = '/Users/jeremy/Library/CloudStorage/OneDrive-UniversityofCalgary/Project 2025 CC Balance/Pilot testing/January 5th Pilot Testing/20260105-141714_LeftFoot_013087.h5'
+    RIGHT_FILE = '/Users/jeremy/Library/CloudStorage/OneDrive-UniversityofCalgary/Project 2025 CC Balance/Pilot testing/January 5th Pilot Testing/20260105-141717_RightFoot_013097.h5'
+    HAND_FILE = '/Users/jeremy/Library/CloudStorage/OneDrive-UniversityofCalgary/Project 2025 CC Balance/Pilot testing/January 5th Pilot Testing/20260105-141719_Hand_013056.h5'
+    # =============================================================================
+    # Walking bout target times (January 5, 2026)
+    # Each tuple: (name, target_time, search_window_seconds)
+    # The script will find walking bouts (bounded by quiet periods) near these times
+    # =============================================================================
+    WALKING_BOUT_TARGETS = [
+        # ('7m walk', dt_time(15, 0, 0), 120),      # 3:00 PM
+        # ('5m walk', dt_time(14 , 59, 0), 120),     # 2:59 PM
+        # ('20m walk', dt_time(15, 8, 0), 120),     # 3:08 PM
+        # ('15m walk', dt_time(15, 9, 0), 120),     # 3:09 PM
+        ('track 2 laps', dt_time(15, 13, 0), 240),  # 3:11 PM
+    ]
+
+    # LEFT_FILE = '/Users/jeremy/Library/CloudStorage/OneDrive-UniversityofCalgary/Project 2025 CC Balance/Pilot testing/2025-10-29/20251029-154305_LF_Pilot_Ch_Oct29.h5'
+    # RIGHT_FILE = '/Users/jeremy/Library/CloudStorage/OneDrive-UniversityofCalgary/Project 2025 CC Balance/Pilot testing/2025-10-29/20251029-154310_RF_Pilot_Ch_Oct29.h5'
+    # HEAD_FILE = '/Users/jeremy/Library/CloudStorage/OneDrive-UniversityofCalgary/Project 2025 CC Balance/Pilot testing/2025-10-29/20251029-154313_Head_Pilot_Ch_Oct29.h5'
+    # HAND_FILE = HEAD_FILE
+    # # =============================================================================
+    # # Walking bout target times (January 5, 2026)
+    # # Each tuple: (name, target_time, search_window_seconds)
+    # # The script will find walking bouts (bounded by quiet periods) near these times
+    # # =============================================================================
+    # WALKING_BOUT_TARGETS = [
+    #     # ('7m walk', dt_time(15, 0, 0), 120),      # 3:00 PM
+    #     # ('5m walk', dt_time(14 , 59, 0), 120),     # 2:59 PM
+    #     # ('20m walk', dt_time(15, 8, 0), 120),     # 3:08 PM
+    #     # ('15m walk', dt_time(15, 9, 0), 120),     # 3:09 PM
+    #     ('track 2 laps', dt_time(16, 34, 0), 240),  # 3:11 PM
+    # ]
+
+    # Cache file location (same directory as head file)
+    CACHE_DIR = Path(HEAD_FILE).parent
+    CACHE_FILE = CACHE_DIR / 'cached_analysis.pkl'
+
+    # =============================================================================
+    # Bout detection parameters
+    # =============================================================================
+    MIN_QUIET_SECONDS = 1.5   # Minimum quiet period to count as walk boundary
+    MIN_WALK_SECONDS = 3.0    # Minimum walking duration to include
+    W_THRESHOLD = 30.0        # Max angular velocity (deg/s) for quiet detection
+    A_THRESHOLD = 1.0         # Max accel deviation from gravity (m/s^2) for quiet
+
+    # ==========================================================================
+    # END: User parameters (once we have a smooth pipeline, the above can all be inputs)
+    # ==========================================================================
+
+    # ===========================================================================
+    # STEP 1/N: Load data and synchronize the IMUs, while checking for any previously cached analysis
+    # ===========================================================================
     cached_data = load_cache(CACHE_FILE)
     use_cache = False
 
@@ -698,27 +749,25 @@ if __name__ == '__main__':
         user_input = input("Use cached bout selections? [y/N]: ").strip().lower()
         use_cache = user_input == 'y'
 
-    # Load all recordings
+    # Load all recordings: display the number of samples.
     print("\nLoading individual recordings...")
     left_rec = load_imu_recording(LEFT_FILE)
     right_rec = load_imu_recording(RIGHT_FILE)
     head_rec = load_imu_recording(HEAD_FILE)
     hand_rec = load_imu_recording(HAND_FILE)
-
     print(f"  Left foot: {len(left_rec)} samples")
     print(f"  Right foot: {len(right_rec)} samples")
     print(f"  Head: {len(head_rec)} samples")
     print(f"  Hand: {len(hand_rec)} samples")
 
-    # Synchronize all recordings to overlapping region
+    # Synchronize all recordings to overlapping region: display the period and frequency.
     print("\nFinding overlapping time region...")
     synced_recordings = find_overlapping_recordings([left_rec, right_rec, head_rec, hand_rec])
     left_synced, right_synced, head_synced, hand_synced = synced_recordings
-
     PERIOD = left_synced.period
     print(f"\nSampling period: {PERIOD:.6f} s ({1/PERIOD:.1f} Hz)")
 
-    # Create recordings dict for convenience
+    # Create recordings dict for convenience (this just groups the synced recordings together. access via recordings['left'], etc.)
     recordings = {
         'left': left_synced,
         'right': right_synced,
@@ -727,7 +776,7 @@ if __name__ == '__main__':
     }
 
     # ==========================================================================
-    # Compute full trajectory for left foot
+    # Step 2/N: Compute full trajectory for left foot
     # ==========================================================================
     print("\n" + "=" * 60)
     print("Computing full trajectory for left foot...")
@@ -737,7 +786,7 @@ if __name__ == '__main__':
     print(f"  Full trajectory computed: {len(left_full_walk_info['P'])} samples")
 
     # ==========================================================================
-    # Detect all walking bouts using quiet period detection
+    # Step 3/N: Detect all walking bouts using quiet period detection
     # ==========================================================================
     print("\n" + "=" * 60)
     print("Detecting walking bouts from quiet periods...")
@@ -757,7 +806,7 @@ if __name__ == '__main__':
         print(f"  {i+1}. {bout_start_time.strftime('%H:%M:%S')} - {bout.duration_seconds:.1f}s")
 
     # ==========================================================================
-    # Interactive bout selection (or use cache)
+    # Step 4/N: Interactive bout selection (or use cache)
     # ==========================================================================
     print("\n" + "=" * 60)
     print("Selecting walking bouts...")
@@ -786,7 +835,7 @@ if __name__ == '__main__':
         plt.close('all')
 
     # ==========================================================================
-    # Plot full trajectory with bout sections
+    # Step 5/N: Plot full trajectory with bout sections
     # ==========================================================================
     print("\n" + "=" * 60)
     print("Plotting full trajectory with bout locations...")
@@ -796,7 +845,7 @@ if __name__ == '__main__':
                                      "Left Foot Full Recording")
 
     # ==========================================================================
-    # Process each selected bout
+    # Step 6/N:Process each selected bout for left/right/head analysis
     # ==========================================================================
     print("\n" + "=" * 60)
     print("Processing selected walking bouts...")
@@ -831,15 +880,18 @@ if __name__ == '__main__':
                 **result
             }
 
-            # Plot stride patterns for this bout
-            fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-            plt.sca(axes[0])
-            imu.plt_ltrl_frwd_strides(result['left_strides'], show=False)
-            axes[0].set_title(f'Left Foot - {sel.name}')
-            plt.sca(axes[1])
-            imu.plt_ltrl_frwd_strides(result['right_strides'], show=False)
-            axes[1].set_title(f'Right Foot - {sel.name}')
-            plt.tight_layout()
+            # Plot stride patterns for this bout (skip if no steps detected)
+            if left_metrics['n_steps'] > 0 and right_metrics['n_steps'] > 0:
+                fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+                plt.sca(axes[0])
+                imu.plt_ltrl_frwd_strides(result['left_strides'], show=False)
+                axes[0].set_title(f'Left Foot - {sel.name}')
+                plt.sca(axes[1])
+                imu.plt_ltrl_frwd_strides(result['right_strides'], show=False)
+                axes[1].set_title(f'Right Foot - {sel.name}')
+                plt.tight_layout()
+            else:
+                print(f"  WARNING: No steps detected, skipping stride plots")
 
             # Plot rotation-corrected trajectories (both feet aligned to Y axis)
             plot_rotation_corrected_trajectories(
@@ -860,7 +912,7 @@ if __name__ == '__main__':
             continue
 
     # ==========================================================================
-    # Save cache
+    # Step 7/N:Save cache
     # ==========================================================================
     cache_data = {
         'bout_selections': bout_selections,
@@ -876,7 +928,7 @@ if __name__ == '__main__':
     save_cache(CACHE_FILE, cache_data)
 
     # ==========================================================================
-    # Summary comparison across bouts
+    # Step 8/N: Summary table comparison across bouts
     # ==========================================================================
     if bout_results:
         print("\n" + "=" * 60)
