@@ -2,32 +2,40 @@ import numpy as np
 import h5py
 from typing import Tuple, Optional, Any, Union, List
 from dataclasses import dataclass
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timezone, timedelta
 import pandas as pd
 
 GRAVITY = 9.80297286843
 
 
-def apdm_time_to_datetime(apdm_time: np.ndarray) -> np.ndarray:
+def apdm_time_to_datetime(apdm_time: np.ndarray, utc_offset_hours: Optional[float] = None) -> np.ndarray:
     """
     Convert APDM uint64 timestamps to datetime objects.
 
     APDM stores time as microseconds since Unix epoch (Jan 1, 1970).
+    If utc_offset_hours is provided, datetimes are converted to the recording's
+    local timezone so results are consistent regardless of server timezone.
 
     Parameters:
     -----------
     apdm_time : np.ndarray
         Array of uint64 timestamps from APDM sensor
+    utc_offset_hours : float, optional
+        UTC offset of the recording timezone (e.g., -7 for Mountain Time).
+        If provided, returns timezone-aware datetimes in that timezone.
+        If None, falls back to system local time (legacy behavior).
 
     Returns:
     --------
     np.ndarray
         Array of datetime objects
     """
-    # APDM time is in microseconds since Unix epoch
-    # Convert to seconds and then to datetime
     timestamps_seconds = apdm_time / 1_000_000.0
-    return np.array([datetime.fromtimestamp(ts) for ts in timestamps_seconds])
+    if utc_offset_hours is not None:
+        tz = timezone(timedelta(hours=utc_offset_hours))
+        return np.array([datetime.fromtimestamp(ts, tz=tz) for ts in timestamps_seconds])
+    else:
+        return np.array([datetime.fromtimestamp(ts) for ts in timestamps_seconds])
 
 
 @dataclass
@@ -55,6 +63,7 @@ class ImuRecording:
     Mb: Optional[np.ndarray] = None
     raw_time: Optional[np.ndarray] = None  # Raw APDM timestamps for precise sync
     file_path: Optional[str] = None
+    tz_offset_hours: Optional[float] = None  # UTC offset from APDM sensor config
 
     def __len__(self) -> int:
         return len(self.Wb)
@@ -80,7 +89,8 @@ class ImuRecording:
                 period=self.period,
                 Mb=self.Mb[start:stop, :] if self.Mb is not None else None,
                 raw_time=self.raw_time[start:stop] if self.raw_time is not None else None,
-                file_path=self.file_path
+                file_path=self.file_path,
+                tz_offset_hours=self.tz_offset_hours,
             )
 
         raise TypeError(f"ImuRecording indices must be integers or slices, not {type(key).__name__}")
@@ -274,7 +284,7 @@ import h5py
 import numpy as np
 from typing import Optional, Tuple
 
-def getdata_apdm(file_path: str, orientation: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray, float, np.ndarray, np.ndarray, np.ndarray]:
+def getdata_apdm(file_path: str, orientation: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray, float, np.ndarray, np.ndarray, np.ndarray, Optional[float]]:
     """
     Load IMU data from APDM .h5 file and apply orientation transformation.
 
@@ -293,6 +303,8 @@ def getdata_apdm(file_path: str, orientation: Optional[int] = None) -> Tuple[np.
             Array of datetime objects for each sample
         time_elapsed_samples : np.ndarray
             Array of elapsed time in samples (0, 1, 2, ...)
+        tz_offset_hours : float or None
+            UTC offset from sensor config (e.g., -6.0 for MDT), or None if not found
     """
 
     with h5py.File(file_path, 'r') as f:
@@ -301,6 +313,13 @@ def getdata_apdm(file_path: str, orientation: Optional[int] = None) -> Tuple[np.
         l_time = f[l1][l2_sensorid]['Time'][()]
         freq = float(f[l1][l2_sensorid]['Configuration'].attrs['Sample Rate'])
         period = 1.0 / freq
+
+        # Read timezone offset from sensor configuration if available
+        config = f[l1][l2_sensorid]['Configuration']
+        if 'Timezone Offset' in config.attrs:
+            tz_offset_hours = float(config.attrs['Timezone Offset'])
+        else:
+            tz_offset_hours = None
         # Read sensor data (transposed to make Nx3 like MATLAB)
         accel_path = f'{l1}/{l2_sensorid}/Accelerometer'
         gyro_path = f'{l1}/{l2_sensorid}/Gyroscope'
@@ -324,10 +343,10 @@ def getdata_apdm(file_path: str, orientation: Optional[int] = None) -> Tuple[np.
         else:
             raise ValueError(f"Magnetometer data not found at {mag_path}")
 
-    # Convert APDM timestamps to datetime
-    time_datetime = apdm_time_to_datetime(l_time)
+    # Convert APDM timestamps to datetime (using recording timezone if available)
+    time_datetime = apdm_time_to_datetime(l_time, tz_offset_hours)
     time_elapsed_samples = np.arange(len(l_time))
-    
+
     # Orientation constants (matching MATLAB exactly)
     ORIGINAL = 0
     LED_UP_RIGHT_FRWD = 1  # This one is normally used on feet
@@ -370,7 +389,7 @@ def getdata_apdm(file_path: str, orientation: Optional[int] = None) -> Tuple[np.
     A = np.column_stack([AX, AY, AZ])
     M = m
 
-    return W, A, period, M, time_datetime, time_elapsed_samples
+    return W, A, period, M, time_datetime, time_elapsed_samples, tz_offset_hours
 
 def detect_quiet_time(W: np.ndarray, period: float) -> np.ndarray:
     """
@@ -529,7 +548,7 @@ def load_imu_recording(file_path: str, orientation: Optional[int] = None) -> Imu
         l2_sensorid = list(f[l1].keys())[0]
         raw_time = np.asarray(f[l1][l2_sensorid]['Time'][()])  # type: ignore[index]
 
-    W, A, period, M, time_datetime, time_elapsed_samples = getdata_apdm(file_path, orientation)
+    W, A, period, M, time_datetime, time_elapsed_samples, tz_offset_hours = getdata_apdm(file_path, orientation)
 
     return ImuRecording(
         Wb=W,
@@ -539,7 +558,8 @@ def load_imu_recording(file_path: str, orientation: Optional[int] = None) -> Imu
         period=period,
         Mb=M,
         raw_time=raw_time,
-        file_path=file_path
+        file_path=file_path,
+        tz_offset_hours=tz_offset_hours,
     )
 
 
@@ -569,7 +589,8 @@ def slice_recording_by_indices(recording: ImuRecording, start_idx: int, end_idx:
         period=recording.period,
         Mb=recording.Mb[start_idx:end_idx, :] if recording.Mb is not None else None,
         raw_time=recording.raw_time[start_idx:end_idx] if recording.raw_time is not None else None,
-        file_path=recording.file_path
+        file_path=recording.file_path,
+        tz_offset_hours=recording.tz_offset_hours,
     )
 
 
@@ -761,14 +782,14 @@ def sync_apdm(l_file: str, r_file: str, sync: bool = True, force_sync_value: int
         print('Warning: Not Syncing')
 
     # Load left IMU data
-    Wb, Ab, period, Mb, time_dt, time_samp = getdata_apdm(l_file, 1)
+    Wb, Ab, period, Mb, time_dt, time_samp, _ = getdata_apdm(l_file, 1)
     LeftWb, LeftAb, static_period, LeftMb, left_time_datetime, left_time_elapsed_samples = getdata(
         Wb, Ab, period, [tuple(l_section)], M=Mb, time_datetime=time_dt, time_elapsed_samples=time_samp)
     if plt.get_fignums():
         plt.gcf().canvas.manager.set_window_title('Left IMU')
 
     # Load right IMU data
-    Wb, Ab, period, Mb, time_dt, time_samp = getdata_apdm(r_file, 1)
+    Wb, Ab, period, Mb, time_dt, time_samp, _ = getdata_apdm(r_file, 1)
     RightWb, RightAb, _, RightMb, right_time_datetime, right_time_elapsed_samples = getdata(
         Wb, Ab, period, [tuple(r_section)], M=Mb, time_datetime=time_dt, time_elapsed_samples=time_samp)
     if plt.get_fignums():
