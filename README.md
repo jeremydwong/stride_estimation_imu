@@ -149,8 +149,8 @@ git push github main
 
 ## License
 
-[Add your license here]
+MIT License. See [LICENSE](LICENSE) for details.
 
 ## Contact
 
-[Add contact information here]
+[jeremydwong.github.io](https://jeremydwong.github.io)
