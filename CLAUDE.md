@@ -41,7 +41,7 @@ The original MATLAB implementation is in the `matlab/` directory. Key demo files
   - Quaternion operations: `eul2qua()`, `qua2eul()`, `qua2rot()`
   - Footfall detection: `foot_fall()`, `acc_tilt()`
   - Main processing pipeline: `compute_pos()` - performs inertial mechanization
-  - Stride segmentation: `stride_segmentation()`, `get_steps()`
+  - Stride segmentation: `stride_segmentation()`, `get_strides()`
   - Kalman filtering for tilt correction: `kf_tilt()`
   - Zero velocity updates: `zupts()`
 
@@ -76,3 +76,41 @@ The main data structure from `compute_pos()` contains:
 
 ### MATLAB Legacy
 The `matlab/` directory contains the original MATLAB implementation with equivalent functionality. The Python version is a port of key MATLAB functions with similar naming conventions.
+
+## Log
+
+### 2026-06-11
+
+**Done and verified:**
+
+1. **The step→stride rename** — the stride pipeline used "step" naming throughout
+   despite segmenting strides (footfall → next footfall, same foot). Now:
+   `get_strides`, `cut_stride_section`, `filter_strides`, the `stride_samples`
+   dict key, plus the misleading locals in `demo_two_feet_head.py`
+   (`compute_stride_metrics`, `stride_speeds`, `n_strides`, etc.).
+   Compile-checked; `demo_one_foot.py` runs clean.
+
+2. **`step_segmentation()` exists and works** — new in `inertial.py`, exported
+   from the package. Step = opposite-foot footfall to footfall; gait-initiation
+   steps included; missed contacts and standing footfalls handled. On synthetic
+   data it recovers time/length/width exactly. On real Brock bouts, **step time
+   is solid everywhere** (~0.50 s, splitting cleanly by side).
+
+**The honest caveat — spatial step measures:** length-split and width depend on
+anchoring the two feet's frames at a side-by-side stance, and the Brock bouts
+are hostile to that: several un-ZUPTed seconds of box-handling before the walk,
+turns after it. Three anchor strategies were tried; the one that stuck scores
+each candidate stance by the **longest un-ZUPTed gap connecting it to the
+walking steps**, reported as `anchor_quality`. It works as a filter: bouts with
+quality ≲ 1 s give plausible numbers (e.g. trial 76 bout 2: quality 0.06 s,
+width 0.24±0.03 m, lengths 0.77/0.44 by side — possibly real box asymmetry, s2
+was carrying); bouts with quality > 2 s give garbage splits (negative lengths)
+and are correctly flagged.
+
+**Not done yet:**
+- Haven't run `step_segmentation` over all 192 bouts / added step columns to
+  `brock_trial_table.csv`.
+- Footfall recall is the next real lever: 1–2 missed contacts per bout (the
+  `skips`/`slow` counts) — restoring the `foot_fall_opposite_velocity` merge in
+  `compute_position_two_imus` (commented call sites, function already ported)
+  would likely fix those.

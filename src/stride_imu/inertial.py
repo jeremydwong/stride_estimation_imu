@@ -304,13 +304,13 @@ def zero_velocity_updates(i: int, FF: np.ndarray, An: np.ndarray, Anz: np.ndarra
     if i == 1:
         last_footfall = -1
     if FF[i]:
-        step_range = np.arange(last_footfall+1, i+1)
-        if step_range.size < 2:
+        stride_range = np.arange(last_footfall+1, i+1)
+        if stride_range.size < 2:
             return last_footfall
-        step_samples = step_range.size
-        velocity_error = np.sum(An[step_range, :], axis=0)
-        acceleration_error = velocity_error / step_samples
-        Anz[step_range, :] = An[step_range, :] - acceleration_error
+        stride_samples = stride_range.size
+        velocity_error = np.sum(An[stride_range, :], axis=0)
+        acceleration_error = velocity_error / stride_samples
+        Anz[stride_range, :] = An[stride_range, :] - acceleration_error
         last_footfall = i
     return last_footfall
 
@@ -454,7 +454,7 @@ def stride_segmentation(walk_info: Dict[str, Any], period: float, FILTER: int = 
     --------
     dict
         Keys: 'frwd' (forward trajectory per stride), 'ltrl' (lateral),
-        'elev' (elevation), 'frwd_speed', 'time', 'step_samples',
+        'elev' (elevation), 'frwd_speed', 'time', 'stride_samples',
         'foot_heading', 'frwd_swing', 'ltrl_swing', 'abs_frwd', 'abs_ltrl',
         'theta', 'start_end', 'diff_foot_heading', 'frwd_speed_compensated'
     """
@@ -474,10 +474,10 @@ def stride_segmentation(walk_info: Dict[str, Any], period: float, FILTER: int = 
     too_long = np.where(swing_time > MAX_FF_TIME)[0]
     swing_start = np.delete(swing_start, too_long)
     swing_finish = np.delete(swing_finish, too_long)
-    stepData = get_steps(swing_start, swing_finish, walk_info, period, FILTER, OUTLIER_SECTION_SAMPLES)
-    # display stepData
-    print("Detected {} steps after segmentation.".format(len(swing_start)))
-    return stepData
+    strides = get_strides(swing_start, swing_finish, walk_info, period, FILTER, OUTLIER_SECTION_SAMPLES)
+    # display strides
+    print("Detected {} strides after segmentation.".format(len(swing_start)))
+    return strides
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -488,16 +488,16 @@ def rotate_angle(X: np.ndarray, Y: np.ndarray, ang: float) -> Tuple[np.ndarray, 
     Yr = X * np.sin(ang) + Y * np.cos(ang)
     return Xr, Yr
 
-def get_steps(step_start, step_end, walk_info, PERIOD, FILTER, OUTLIER_SECTION, verbose=False):
+def get_strides(stride_start, stride_end, walk_info, PERIOD, FILTER, OUTLIER_SECTION, verbose=False):
     """
-    get_steps(step_start, step_end,walk_info,PERIOD,FILTER,OUTLIER_SECTION,verbose=Fals)
+    get_strides(stride_start, stride_end,walk_info,PERIOD,FILTER,OUTLIER_SECTION,verbose=Fals)
 
     Parameters:
     -----------
-    step_start : array-like
-        Start indices of steps
-    step_end : array-like
-        End indices of steps
+    stride_start : array-like
+        Start indices of strides
+    stride_end : array-like
+        End indices of strides
     walk_info : dict
         Dictionary containing 'P', 'euler', and 'Vm' arrays
     PERIOD : float
@@ -512,16 +512,16 @@ def get_steps(step_start, step_end, walk_info, PERIOD, FILTER, OUTLIER_SECTION, 
     Returns:
     --------
     dict
-        Dictionary containing stride metrics. If no steps are detected, returns
+        Dictionary containing stride metrics. If no strides are detected, returns
         a dict with empty arrays for all fields.
     """
     PLOT_DETAILS = verbose
 
-    # Handle case when no steps are detected
-    step_start = np.array(step_start).reshape(-1, 1).flatten()
-    step_end = np.array(step_end).reshape(-1, 1).flatten()
+    # Handle case when no strides are detected
+    stride_start = np.array(stride_start).reshape(-1, 1).flatten()
+    stride_end = np.array(stride_end).reshape(-1, 1).flatten()
 
-    if len(step_start) == 0 or len(step_end) == 0:
+    if len(stride_start) == 0 or len(stride_end) == 0:
         # Return empty result structure
         return {
             'frwd_swing': np.array([]).reshape(0, 0),
@@ -535,67 +535,71 @@ def get_steps(step_start, step_end, walk_info, PERIOD, FILTER, OUTLIER_SECTION, 
             'start_end': np.array([]).reshape(0, 0),
             'foot_heading': np.array([]),
             'diff_foot_heading': np.array([]),
-            'step_samples': np.array([]),
+            'stride_samples': np.array([]),
             'time': np.array([]),
             'frwd_speed_compensated': np.array([]),
             'frwd_speed': np.array([])
         }
 
-    # DIRECTION_STEPS, determine the number of steps before and after current one, used to define a straight segment
-    DIRECTION_STEPS = 3  # default 3
-    # mean_step_direction = 0  # when DIRECTION_STEPS is 0, uncomment this
+    # DIRECTION_STRIDES, determine the number of strides before and after current one, used to define a straight segment
+    DIRECTION_STRIDES = 3  # default 3
+    # mean_stride_direction = 0  # when DIRECTION_STRIDES is 0, uncomment this
     
     EXTRA_FRWD_CORRECTION = 1  # default is 1. This will straighten the paths perfectly
     # EXTRA_FRWD_CORRECTION = 0  # for hand reaching Oct 2023
 
-    number_of_steps = len(step_start)
-    longest_step = np.max(step_end - step_start) + 1
+    number_of_strides = len(stride_start)
+    longest_stride = np.max(stride_end - stride_start) + 1
     
     P = walk_info['P']
     euler = walk_info['euler']
     Vm = walk_info['Vm']
     
     # Create matrices to store results
-    ltrl_swing = np.zeros((number_of_steps, longest_step))
-    frwd_swing = np.zeros((number_of_steps, longest_step))
-    ltrl = np.zeros((number_of_steps, longest_step))
-    frwd = np.zeros((number_of_steps, longest_step))
-    ltrl_straighten = np.zeros((number_of_steps, longest_step))
-    frwd_straighten = np.zeros((number_of_steps, longest_step))
-    abs_ltrl = np.zeros((number_of_steps, longest_step))
-    abs_frwd = np.zeros((number_of_steps, longest_step))
-    elev = np.zeros((number_of_steps, longest_step))
-    theta = np.zeros((number_of_steps, longest_step))
-    foot_heading = np.zeros(number_of_steps)
-    diff_foot_heading = np.zeros(number_of_steps)
-    start_end = np.zeros((number_of_steps, 2))
+    ltrl_swing = np.zeros((number_of_strides, longest_stride))
+    frwd_swing = np.zeros((number_of_strides, longest_stride))
+    ltrl = np.zeros((number_of_strides, longest_stride))
+    frwd = np.zeros((number_of_strides, longest_stride))
+    ltrl_straighten = np.zeros((number_of_strides, longest_stride))
+    frwd_straighten = np.zeros((number_of_strides, longest_stride))
+    abs_ltrl = np.zeros((number_of_strides, longest_stride))
+    abs_frwd = np.zeros((number_of_strides, longest_stride))
+    elev = np.zeros((number_of_strides, longest_stride))
+    theta = np.zeros((number_of_strides, longest_stride))
+    foot_heading = np.zeros(number_of_strides)
+    diff_foot_heading = np.zeros(number_of_strides)
+    start_end = np.zeros((number_of_strides, 2))
     
-    # Compute individual step direction
-    direction = np.arctan2(P[step_end, 1] - P[step_start, 1], 
-                           P[step_end, 0] - P[step_start, 0])
+    # Compute individual stride direction
+    direction = np.arctan2(P[stride_end, 1] - P[stride_start, 1], 
+                           P[stride_end, 0] - P[stride_start, 0])
     
     if PLOT_DETAILS:
         # This is the average walk direction that is used to rotate the trajectory
-        Px = P[step_start, 0]
-        Py = P[step_start, 1]
+        Px = P[stride_start, 0]
+        Py = P[stride_start, 1]
         # Linear fit (polyfit with degree 1)
         coeffs = np.polyfit(Px, Py, 1)
         pol = np.poly1d(coeffs)
         # Use the atan2 to determine the right grid quadrant
-        overall_step_direction = np.arctan2(pol(Px[-1]) - pol(Px[0]), Px[-1] - Px[0])
-        frwd_pol_rot, ltrl_pol_rot = rotate_angle(Px, Py, -overall_step_direction)
+        overall_stride_direction = np.arctan2(pol(Px[-1]) - pol(Px[0]), Px[-1] - Px[0])
+        frwd_pol_rot, ltrl_pol_rot = rotate_angle(Px, Py, -overall_stride_direction)
         
         PATH_FIG = plt.figure()
         plt.plot(frwd_pol_rot, ltrl_pol_rot, 'k')
         plt.grid(True)
     
     # Unwrap the euler in order to eliminate discontinuities
-    walk_foot_heading = np.unwrap(euler[step_end, 2])
+    walk_foot_heading = np.unwrap(euler[stride_end, 2])
     
     # Perform a default line fit correction for heading
+    # (a line fit needs at least 2 strides; with 1 the correction is just y itself)
     x = np.arange(1, len(walk_foot_heading) + 1)
     y = walk_foot_heading
-    coeffs = np.polyfit(x, y, 1)
+    if len(y) >= 2:
+        coeffs = np.polyfit(x, y, 1)
+    else:
+        coeffs = np.array([0.0, y[0]])
     pol = np.poly1d(coeffs)
     heading_correction = pol(x)
     corrected_heading = y - heading_correction
@@ -608,58 +612,64 @@ def get_steps(step_start, step_end, walk_info, PERIOD, FILTER, OUTLIER_SECTION, 
         plt.plot(heading_correction - coeffs[1], 'r')
         plt.plot(y - heading_correction, 'g')
     
-    step_samples = np.zeros(number_of_steps)
+    stride_samples = np.zeros(number_of_strides)
     
-    for i in range(number_of_steps):
-        step_len = step_end[i] - step_start[i] + 1
+    for i in range(number_of_strides):
+        stride_len = stride_end[i] - stride_start[i] + 1
         
         # Rotate for swing
-        frwd_swing[i, :step_len] = (P[step_start[i]:step_end[i]+1, 0] * np.cos(-direction[i]) - 
-                                    P[step_start[i]:step_end[i]+1, 1] * np.sin(-direction[i]))
-        frwd_swing[i, step_len:] = frwd_swing[i, step_len-1]
+        frwd_swing[i, :stride_len] = (P[stride_start[i]:stride_end[i]+1, 0] * np.cos(-direction[i]) - 
+                                    P[stride_start[i]:stride_end[i]+1, 1] * np.sin(-direction[i]))
+        frwd_swing[i, stride_len:] = frwd_swing[i, stride_len-1]
         
-        ltrl_swing[i, :step_len] = (P[step_start[i]:step_end[i]+1, 0] * np.sin(-direction[i]) + 
-                                    P[step_start[i]:step_end[i]+1, 1] * np.cos(-direction[i]))
-        ltrl_swing[i, step_len:] = ltrl_swing[i, step_len-1]
+        ltrl_swing[i, :stride_len] = (P[stride_start[i]:stride_end[i]+1, 0] * np.sin(-direction[i]) + 
+                                    P[stride_start[i]:stride_end[i]+1, 1] * np.cos(-direction[i]))
+        ltrl_swing[i, stride_len:] = ltrl_swing[i, stride_len-1]
         
-        # Uses the nearby steps to determine the angle, is less sensitive to gyro drift
-        if DIRECTION_STEPS:
-            # Select the steps +/- DIRECTION_STEPS
-            if i > DIRECTION_STEPS and number_of_steps - i > DIRECTION_STEPS:
-                nearby_steps_index = np.arange(i - DIRECTION_STEPS, i + DIRECTION_STEPS + 1)
-            elif i <= DIRECTION_STEPS:
-                nearby_steps_index = np.arange(0, min(i + DIRECTION_STEPS + 1, number_of_steps))
+        # Uses the nearby strides to determine the angle, is less sensitive to gyro drift
+        if DIRECTION_STRIDES:
+            # Select the strides +/- DIRECTION_STRIDES
+            if i > DIRECTION_STRIDES and number_of_strides - i > DIRECTION_STRIDES:
+                nearby_strides_index = np.arange(i - DIRECTION_STRIDES, i + DIRECTION_STRIDES + 1)
+            elif i <= DIRECTION_STRIDES:
+                nearby_strides_index = np.arange(0, min(i + DIRECTION_STRIDES + 1, number_of_strides))
             else:
-                nearby_steps_index = np.arange(i - DIRECTION_STEPS, number_of_steps)
+                nearby_strides_index = np.arange(i - DIRECTION_STRIDES, number_of_strides)
             
             # Find local direction of travel
-            nearby_steps = step_start[nearby_steps_index]
-            x_local = P[nearby_steps, 0]
-            y_local = P[nearby_steps, 1]
-            coeffs_local = np.polyfit(x_local, y_local, 1)
-            pol_local = np.poly1d(coeffs_local)
-            mean_step_direction = np.arctan2(pol_local(x_local[-1]) - pol_local(x_local[0]), 
-                                            x_local[-1] - x_local[0])
-            
-            # Find a local heading correction
-            y_heading = walk_foot_heading[nearby_steps_index]
-            x_heading = nearby_steps_index
-            coeffs_heading = np.polyfit(x_heading, y_heading, 1)
-            pol_heading = np.poly1d(coeffs_heading)
-            heading_correction = pol_heading(x_heading)
-            current_index = np.where(x_heading == i)[0][0]
-            corrected_heading[i] = y_heading[current_index] - heading_correction[current_index]
+            # (with a single stride there is no neighborhood to fit: fall back
+            # to the stride's own direction and no heading correction)
+            nearby_strides = stride_start[nearby_strides_index]
+            if len(nearby_strides) >= 2:
+                x_local = P[nearby_strides, 0]
+                y_local = P[nearby_strides, 1]
+                coeffs_local = np.polyfit(x_local, y_local, 1)
+                pol_local = np.poly1d(coeffs_local)
+                mean_stride_direction = np.arctan2(pol_local(x_local[-1]) - pol_local(x_local[0]),
+                                                x_local[-1] - x_local[0])
+
+                # Find a local heading correction
+                y_heading = walk_foot_heading[nearby_strides_index]
+                x_heading = nearby_strides_index
+                coeffs_heading = np.polyfit(x_heading, y_heading, 1)
+                pol_heading = np.poly1d(coeffs_heading)
+                heading_correction = pol_heading(x_heading)
+                current_index = np.where(x_heading == i)[0][0]
+                corrected_heading[i] = y_heading[current_index] - heading_correction[current_index]
+            else:
+                mean_stride_direction = direction[i]
+                corrected_heading[i] = 0.0
         else:
-            mean_step_direction = 0  # If DIRECTION_STEPS is 0
+            mean_stride_direction = 0  # If DIRECTION_STRIDES is 0
         
-        frwd_rot, ltrl_rot = rotate_angle(P[step_start[i]:step_end[i]+1, 0], 
-                                          P[step_start[i]:step_end[i]+1, 1], 
-                                          -mean_step_direction)
-        frwd[i, :step_len] = frwd_rot
-        frwd[i, step_len:] = frwd[i, step_len-1]
+        frwd_rot, ltrl_rot = rotate_angle(P[stride_start[i]:stride_end[i]+1, 0], 
+                                          P[stride_start[i]:stride_end[i]+1, 1], 
+                                          -mean_stride_direction)
+        frwd[i, :stride_len] = frwd_rot
+        frwd[i, stride_len:] = frwd[i, stride_len-1]
         
-        ltrl[i, :step_len] = ltrl_rot
-        ltrl[i, step_len:] = ltrl[i, step_len-1]
+        ltrl[i, :stride_len] = ltrl_rot
+        ltrl[i, stride_len:] = ltrl[i, stride_len-1]
         
         if i > 0:
             ltrl[i, :] = ltrl[i, :] - ltrl[i, 0] + ltrl[i-1, -1]
@@ -667,19 +677,19 @@ def get_steps(step_start, step_end, walk_info, PERIOD, FILTER, OUTLIER_SECTION, 
             ltrl[i, :] = ltrl[i, :] - ltrl[i, 0]
         
         # Store elevation information
-        elev[i, :step_len] = P[step_start[i]:step_end[i]+1, 2]
-        elev[i, step_len:] = elev[i, step_len-1]
+        elev[i, :stride_len] = P[stride_start[i]:stride_end[i]+1, 2]
+        elev[i, stride_len:] = elev[i, stride_len-1]
         
         # Store pitch angle
-        theta[i, :step_len] = euler[step_start[i]:step_end[i]+1, 1]
-        theta[i, step_len:] = theta[i, step_len-1]
+        theta[i, :stride_len] = euler[stride_start[i]:stride_end[i]+1, 1]
+        theta[i, stride_len:] = theta[i, stride_len-1]
         
-        step_samples[i] = step_end[i] - step_start[i]
+        stride_samples[i] = stride_end[i] - stride_start[i]
         
         # Store heading angle
         foot_heading[i] = corrected_heading[i]
-        diff_foot_heading[i] = euler[step_end[i], 2] - euler[step_start[i], 2]
-        start_end[i, :] = [step_start[i], step_end[i]]
+        diff_foot_heading[i] = euler[stride_end[i], 2] - euler[stride_start[i], 2]
+        start_end[i, :] = [stride_start[i], stride_end[i]]
     
     ltrl_end = ltrl[:, -1]
     frwd_end = frwd[:, -1]
@@ -691,7 +701,7 @@ def get_steps(step_start, step_end, walk_info, PERIOD, FILTER, OUTLIER_SECTION, 
     if PLOT_DETAILS:
         plt.figure(ANG_FIG.number)
         plt.plot(foot_heading, 'k')
-        plt.xlabel('Step #')
+        plt.xlabel('Stride #')
         plt.ylabel('Ang [rad]')
         plt.legend(['Org', 'Linear Fit', 'Line-Fit Correction', 'Piecewise Correction'])
         
@@ -704,16 +714,16 @@ def get_steps(step_start, step_end, walk_info, PERIOD, FILTER, OUTLIER_SECTION, 
         plt.legend(['Line-Fit Correction', 'Piecewise Correction', '', ''])
     
     if EXTRA_FRWD_CORRECTION:
-        mean_step_direction = np.arctan(coeffs[0])
-        frwd_pol_rot, ltrl_pol_rot = rotate_angle(frwd_pol, ltrl_pol, -mean_step_direction)
+        mean_stride_direction = np.arctan(coeffs[0])
+        frwd_pol_rot, ltrl_pol_rot = rotate_angle(frwd_pol, ltrl_pol, -mean_stride_direction)
         ltrl_pol_rot = ltrl_pol_rot - np.mean(ltrl_pol_rot)
-        frwd_end, ltrl_endr = rotate_angle(frwd_end, ltrl_end, -mean_step_direction)
+        frwd_end, ltrl_endr = rotate_angle(frwd_end, ltrl_end, -mean_stride_direction)
         center_ltrl_end = np.mean(ltrl_endr)
         ltrl_endr = ltrl_endr - center_ltrl_end
         
-        for i in range(number_of_steps):
+        for i in range(number_of_strides):
             frwd_straighten[i, :], ltrl_straighten[i, :] = rotate_angle(frwd[i, :], ltrl[i, :], 
-                                                                        -mean_step_direction)
+                                                                        -mean_stride_direction)
             ltrl_straighten[i, :] = ltrl_straighten[i, :] - center_ltrl_end
         
         ltrl = ltrl_straighten
@@ -739,18 +749,18 @@ def get_steps(step_start, step_end, walk_info, PERIOD, FILTER, OUTLIER_SECTION, 
     
     # Check for negative values in frwd
     if np.any(frwd[:, -1] < 0):
-        print('WARNING: NEGATIVE IN FORWARD DIRECTION DETECTED IN STEPS!')
+        print('WARNING: NEGATIVE IN FORWARD DIRECTION DETECTED IN STRIDES!')
         frwd = np.abs(frwd)
     
-    # Compute step speed
-    step_length = frwd[:, -1]
-    time = step_samples * PERIOD
-    step_speed = step_length / time
-    coeffs = np.polyfit(step_speed, step_length, 1)
+    # Compute stride speed
+    stride_length = frwd[:, -1]
+    time = stride_samples * PERIOD
+    stride_speed = stride_length / time
+    coeffs = np.polyfit(stride_speed, stride_length, 1)
     pol = np.poly1d(coeffs)
-    step_length_fit = pol(step_speed)
-    frwd_speed_compensated = step_length - step_length_fit
-    frwd_speed = step_speed
+    stride_length_fit = pol(stride_speed)
+    frwd_speed_compensated = stride_length - stride_length_fit
+    frwd_speed = stride_speed
     
     # Compute first order statistics and assemble result structure
     result = {
@@ -765,7 +775,7 @@ def get_steps(step_start, step_end, walk_info, PERIOD, FILTER, OUTLIER_SECTION, 
         'start_end': start_end.T,
         'foot_heading': foot_heading,
         'diff_foot_heading': diff_foot_heading,
-        'step_samples': step_samples,
+        'stride_samples': stride_samples,
         'time': time,
         'frwd_speed_compensated': frwd_speed_compensated,
         'frwd_speed': frwd_speed
@@ -773,13 +783,13 @@ def get_steps(step_start, step_end, walk_info, PERIOD, FILTER, OUTLIER_SECTION, 
     
     # Eliminate user defined outliers
     out_of_bound = []
-    for i in range(number_of_steps):
-        if step_start[i] in OUTLIER_SECTION or step_end[i] in OUTLIER_SECTION:
+    for i in range(number_of_strides):
+        if stride_start[i] in OUTLIER_SECTION or stride_end[i] in OUTLIER_SECTION:
             out_of_bound.append(i)
     
     if out_of_bound:
         print('User defined outliers')
-        result, number_of_steps = cut_step_section(result, out_of_bound, number_of_steps)
+        result, number_of_strides = cut_stride_section(result, out_of_bound, number_of_strides)
     
     if PLOT_DETAILS:
         t = np.arange(len(Vm)) * PERIOD
@@ -787,8 +797,8 @@ def get_steps(step_start, step_end, walk_info, PERIOD, FILTER, OUTLIER_SECTION, 
         plt.plot(t, Vm)
         if len(OUTLIER_SECTION) > 0:
             plt.plot(t[OUTLIER_SECTION], Vm[OUTLIER_SECTION], '.y')
-        plt.plot(t[step_start[0]], Vm[step_start[0]], '*g')
-        plt.plot(t[step_end[-1]], Vm[step_end[-1]], '*r')
+        plt.plot(t[stride_start[0]], Vm[stride_start[0]], '*g')
+        plt.plot(t[stride_end[-1]], Vm[stride_end[-1]], '*r')
         plt.xlabel('Sample #')
         plt.ylabel('Speed [m/sec]')
         plt.legend(['Vm', 'Start', 'End'])
@@ -796,30 +806,30 @@ def get_steps(step_start, step_end, walk_info, PERIOD, FILTER, OUTLIER_SECTION, 
         plt.show()
     
     if FILTER:
-        result, number_of_steps = filter_steps(result, number_of_steps)
+        result, number_of_strides = filter_strides(result, number_of_strides)
     
     return result
 
 
-def cut_step_section(stride, out_of_bound, number_of_steps):
+def cut_stride_section(stride, out_of_bound, number_of_strides):
     """
-    Remove outlier steps from the stride data
+    Remove outlier strides from the stride data
     
     Parameters:
     -----------
     stride : dict
-        Dictionary containing all step data
+        Dictionary containing all stride data
     out_of_bound : list
-        Indices of steps to remove
-    number_of_steps : int
-        Current number of steps
+        Indices of strides to remove
+    number_of_strides : int
+        Current number of strides
     
     Returns:
     --------
     stride : dict
         Updated stride dictionary with outliers removed
-    number_of_steps : int
-        New number of steps after removal
+    number_of_strides : int
+        New number of strides after removal
     """
     if out_of_bound:
         # Delete columns for 2D arrays (note: in Python, we need to use np.delete)
@@ -836,65 +846,65 @@ def cut_step_section(stride, out_of_bound, number_of_steps):
         # Delete elements for 1D arrays
         stride['foot_heading'] = np.delete(stride['foot_heading'], out_of_bound)
         stride['diff_foot_heading'] = np.delete(stride['diff_foot_heading'], out_of_bound)
-        stride['step_samples'] = np.delete(stride['step_samples'], out_of_bound)
+        stride['stride_samples'] = np.delete(stride['stride_samples'], out_of_bound)
         stride['time'] = np.delete(stride['time'], out_of_bound)
         stride['frwd_speed_compensated'] = np.delete(stride['frwd_speed_compensated'], out_of_bound)
         stride['frwd_speed'] = np.delete(stride['frwd_speed'], out_of_bound)
         
-        new_number_of_steps = number_of_steps - len(out_of_bound)
-        print(f'New number of steps {new_number_of_steps} out of {number_of_steps}')
-        number_of_steps = new_number_of_steps
+        new_number_of_strides = number_of_strides - len(out_of_bound)
+        print(f'New number of strides {new_number_of_strides} out of {number_of_strides}')
+        number_of_strides = new_number_of_strides
     
-    return stride, number_of_steps
+    return stride, number_of_strides
 
 
-def filter_steps(stride, number_of_steps):
+def filter_strides(stride, number_of_strides):
     """
-    Filter out steps that are not within known specifications
+    Filter out strides that are not within known specifications
     
     Parameters:
     -----------
     stride : dict
-        Dictionary containing all step data
-    number_of_steps : int
-        Current number of steps
+        Dictionary containing all stride data
+    number_of_strides : int
+        Current number of strides
         
     Returns:
     --------
     stride : dict
         Filtered stride dictionary
-    number_of_steps : int
-        New number of steps after filtering
+    number_of_strides : int
+        New number of strides after filtering
     """
     # Filter parameters
-    MAX_STEP_LENGTH = 1.8  # Used to eliminate very long steps likely caused by non-detected footfalls
-    MIN_STEP_LENGTH = 0.5  # Used to eliminate very short steps likely caused by non-detected footfalls
+    MAX_STRIDE_LENGTH = 1.8  # Used to eliminate very long strides likely caused by non-detected footfalls
+    MIN_STRIDE_LENGTH = 0.5  # Used to eliminate very short strides likely caused by non-detected footfalls
     MAX_VAR = 2  # Eliminates outliers based on the variance from the median value
     FILTER_ELEVATION = 0
     
     # Some of the filters use a double STD based filtering process
     
-    # Eliminate long steps above the maximum limit
+    # Eliminate long strides above the maximum limit
     frwd = stride['frwd'].T
     median_pos_frwd = np.median(frwd[:, -1])
     std_pos_frwd = np.std(frwd[:, -1])
-    outlier = frwd[:, -1] > MAX_STEP_LENGTH
+    outlier = frwd[:, -1] > MAX_STRIDE_LENGTH
     outlier = np.where(outlier)[0]
     if len(outlier) > 0:
         print('_frwd LONG')
-        stride, number_of_steps = cut_step_section(stride, outlier, number_of_steps)
+        stride, number_of_strides = cut_stride_section(stride, outlier, number_of_strides)
     
-    # Eliminate very short steps
+    # Eliminate very short strides
     frwd = stride['frwd'].T
     median_pos_frwd = np.median(frwd[:, -1])
     std_pos_frwd = np.std(frwd[:, -1])
-    outlier = frwd[:, -1] < MIN_STEP_LENGTH
+    outlier = frwd[:, -1] < MIN_STRIDE_LENGTH
     outlier = np.where(outlier)[0]
     if len(outlier) > 0:
         print('_frwd SHORT')
-        stride, number_of_steps = cut_step_section(stride, outlier, number_of_steps)
+        stride, number_of_strides = cut_stride_section(stride, outlier, number_of_strides)
     
-    # Eliminate steps away from the length median value
+    # Eliminate strides away from the length median value
     frwd = stride['frwd'].T
     median_pos_frwd = np.median(frwd[:, -1])
     std_pos_frwd = np.std(frwd[:, -1])
@@ -902,34 +912,34 @@ def filter_steps(stride, number_of_steps):
     outlier = np.where(outlier)[0]
     if len(outlier) > 0:
         print('_frwd +2 VAR')
-        stride, number_of_steps = cut_step_section(stride, outlier, number_of_steps)
+        stride, number_of_strides = cut_stride_section(stride, outlier, number_of_strides)
     
-    # Eliminate steps that have too much side deviation
+    # Eliminate strides that have too much side deviation
     ltrl = stride['ltrl'].T
     std_pos_ltrl = np.std(ltrl[:, -1])
     outlier = np.abs(ltrl[:, -1]) > std_pos_ltrl * MAX_VAR
     outlier = np.where(outlier)[0]
     if len(outlier) > 0:
         print('_ltrl +2 VAR')
-        stride, number_of_steps = cut_step_section(stride, outlier, number_of_steps)
+        stride, number_of_strides = cut_stride_section(stride, outlier, number_of_strides)
     
     if FILTER_ELEVATION:
-        # Eliminate steps that have too much vertical deviation
+        # Eliminate strides that have too much vertical deviation
         elev = stride['elev'].T
         median_pos_elev = np.median(elev[:, -1])
         std_pos_elev = np.std(elev[:, -1])
         outlier = np.abs(elev[:, -1] - median_pos_elev) > std_pos_elev * MAX_VAR
         outlier = np.where(outlier)[0]
         if len(outlier) > 0:
-            print('_elev +2 VAR steps')
-            stride, number_of_steps = cut_step_section(stride, outlier, number_of_steps)
+            print('_elev +2 VAR strides')
+            stride, number_of_strides = cut_stride_section(stride, outlier, number_of_strides)
 
-    return stride, number_of_steps
+    return stride, number_of_strides
 
 
 def foot_fall_opposite_velocity(Vm: np.ndarray, FF_orig: np.ndarray, period: float,
                                   merge_mode: str = 'MAX_SPEED_OR_ORIG',
-                                  plot_details: bool = False, WALK_SPEED_PERCENTAGE = 0.8,MIN_WALK_SPEED = 2,ACCEL_SLOW_STEPS = 1,STEP_DURATION_VARIABILITY = 0.5) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+                                  plot_details: bool = False, WALK_SPEED_PERCENTAGE = 0.8,MIN_WALK_SPEED = 2,ACCEL_SLOW_STRIDES = 1,STRIDE_DURATION_VARIABILITY = 0.5) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Detect foot falls using the velocity of the opposite foot (temporally, should be near max other-foot speed)
 
@@ -948,8 +958,8 @@ def foot_fall_opposite_velocity(Vm: np.ndarray, FF_orig: np.ndarray, period: flo
 
     WALK_SPEED_PERCENTAGE = 0.8  # as a percentage of median speed; For normal walk use .8, for varying speed use .5
     MIN_WALK_SPEED = 2  # Use 2 for normal walk, 1.2 for varying speeds
-    ACCEL_SLOW_STEPS = 1  # Number of steps used during acceleration and slowing down phase
-    STEP_DURATION_VARIABILITY = 0.5  # Use .5 for normal walk and 1.9+ for varying speed
+    ACCEL_SLOW_STRIDES = 1  # Number of strides used during acceleration and slowing down phase
+    STRIDE_DURATION_VARIABILITY = 0.5  # Use .5 for normal walk and 1.9+ for varying speed
 
         
     Returns:
@@ -970,7 +980,7 @@ def foot_fall_opposite_velocity(Vm: np.ndarray, FF_orig: np.ndarray, period: flo
     # Determine the longest section with continuous motion
     walking_ff_time = np.diff(peaks_idx)
     median_ff_time = np.median(walking_ff_time)
-    walk_section = (walking_ff_time < median_ff_time * (1 + STEP_DURATION_VARIABILITY))
+    walk_section = (walking_ff_time < median_ff_time * (1 + STRIDE_DURATION_VARIABILITY))
 
     # Add padding to find start/end of walks
     B = np.concatenate(([0], walk_section, [0]))
@@ -981,9 +991,9 @@ def foot_fall_opposite_velocity(Vm: np.ndarray, FF_orig: np.ndarray, period: flo
     start_walk = start_walks[idx_walk]
     end_walk = end_walks[idx_walk]
 
-    # Eliminate first and last step, which may correspond to acceleration and slowing down
-    start_walk = start_walk + ACCEL_SLOW_STEPS
-    end_walk = end_walk - ACCEL_SLOW_STEPS
+    # Eliminate first and last stride, which may correspond to acceleration and slowing down
+    start_walk = start_walk + ACCEL_SLOW_STRIDES
+    end_walk = end_walk - ACCEL_SLOW_STRIDES
 
     if plot_details:
         import matplotlib.pyplot as plt
@@ -992,7 +1002,7 @@ def foot_fall_opposite_velocity(Vm: np.ndarray, FF_orig: np.ndarray, period: flo
         plt.plot(walk_section * median_ff_time, 'ok')
         plt.plot(start_walk, walking_ff_time[start_walk], '.g')
         plt.plot(end_walk, walking_ff_time[end_walk], '.r')
-        plt.legend(['Time between steps', 'Median walk time', 'Beginning of Walk', 'End of Walk'])
+        plt.legend(['Time between strides', 'Median walk time', 'Beginning of Walk', 'End of Walk'])
         plt.title('Stride duration')
 
         plt.figure()
@@ -1001,7 +1011,7 @@ def foot_fall_opposite_velocity(Vm: np.ndarray, FF_orig: np.ndarray, period: flo
         plt.plot(peaks_idx[start_walk], Vm[peaks_idx[start_walk]], '*g')
         plt.plot(peaks_idx[end_walk], Vm[peaks_idx[end_walk]], '*r')
         plt.legend(['Speed', 'Max Speed', 'Beginning of Walk', 'End of Walk'])
-        plt.title('Increase STEP_DURATION_VARIABILITY until it includes all the walking area')
+        plt.title('Increase STRIDE_DURATION_VARIABILITY until it includes all the walking area')
 
     # Walking portion is defined at the point that the speed reaches WALK_SPEED_PERCENTAGE of the median speed value
     median_vel = np.mean(Vm[FF_max_speed])
@@ -1126,11 +1136,11 @@ def compute_position_two_imus(leftWb: np.ndarray, leftAb: np.ndarray,
     # duplicate for FF_walking
     right_walk_info['FF_walking'] = right_walk_info['FF'].copy()
 
-    MAX_NUMBER_STEP_DIFF = 2  # Default 2
+    MAX_NUMBER_FOOTFALL_DIFF = 2  # Default 2
     left_ff_count = np.sum(left_walk_info['FF_walking'])
     right_ff_count = np.sum(right_walk_info['FF_walking'])
-    if abs(left_ff_count - right_ff_count) > MAX_NUMBER_STEP_DIFF:
-        print('Warning! incompatible number of steps, this needs to be fixed.')
+    if abs(left_ff_count - right_ff_count) > MAX_NUMBER_FOOTFALL_DIFF:
+        print('Warning! incompatible number of footfalls between feet, this needs to be fixed.')
         print('Check MIN_WALK_SPEED in foot_fall_opposite_velocity')
         print(f'Left: {left_ff_count}, Right: {right_ff_count}')
 
@@ -1164,45 +1174,46 @@ def compute_position_two_imus(leftWb: np.ndarray, leftAb: np.ndarray,
     # Make Plots
     import matplotlib.pyplot as plt
 
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
-    ax.plot(left_walk_info['P'][left_walk_info['FF'], 0],
-            left_walk_info['P'][left_walk_info['FF'], 1],
-            left_walk_info['P'][left_walk_info['FF'], 2],
-            '.g', label='left')
-    ax.plot(right_walk_info['P'][right_walk_info['FF'], 0],
-            right_walk_info['P'][right_walk_info['FF'], 1],
-            right_walk_info['P'][right_walk_info['FF'], 2],
-            '.r', label='right')
-    ax.plot(left_walk_info['P'][:, 0],
-            left_walk_info['P'][:, 1],
-            left_walk_info['P'][:, 2], 'b-')
-    ax.plot(right_walk_info['P'][:, 0],
-            right_walk_info['P'][:, 1],
-            right_walk_info['P'][:, 2], 'r-')
-    ax.set_xlabel('X [m]')
-    ax.set_ylabel('Y [m]')
-    ax.set_zlabel('Z [m]')
-    ax.legend()
-    ax.grid(True)
-    plt.axis('equal')
+    if plot_details:
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+        ax.plot(left_walk_info['P'][left_walk_info['FF'], 0],
+                left_walk_info['P'][left_walk_info['FF'], 1],
+                left_walk_info['P'][left_walk_info['FF'], 2],
+                '.g', label='left')
+        ax.plot(right_walk_info['P'][right_walk_info['FF'], 0],
+                right_walk_info['P'][right_walk_info['FF'], 1],
+                right_walk_info['P'][right_walk_info['FF'], 2],
+                '.r', label='right')
+        ax.plot(left_walk_info['P'][:, 0],
+                left_walk_info['P'][:, 1],
+                left_walk_info['P'][:, 2], 'b-')
+        ax.plot(right_walk_info['P'][:, 0],
+                right_walk_info['P'][:, 1],
+                right_walk_info['P'][:, 2], 'r-')
+        ax.set_xlabel('X [m]')
+        ax.set_ylabel('Y [m]')
+        ax.set_zlabel('Z [m]')
+        ax.legend()
+        ax.grid(True)
+        plt.axis('equal')
 
-    fig, axes = plt.subplots(2, 1, figsize=(12, 8))
-    axes[0].plot(t, left_walk_info['Vm'])
-    axes[0].plot(t[left_walk_info['FF']], left_walk_info['Vm'][left_walk_info['FF']], 'g*')
-    axes[0].plot(t[left_walk_info['FF_walking']], left_walk_info['Vm'][left_walk_info['FF_walking']], 'k.')
-    axes[0].grid(True)
-    axes[0].set_ylabel('Left |V| [m/s]')
-    axes[0].set_xlabel('time [s]')
-    axes[0].legend(['|V|', 'FFs', 'Walking'])
-    axes[0].set_title('Foot Fall detection using opposite shoe speed')
+        fig, axes = plt.subplots(2, 1, figsize=(12, 8))
+        axes[0].plot(t, left_walk_info['Vm'])
+        axes[0].plot(t[left_walk_info['FF']], left_walk_info['Vm'][left_walk_info['FF']], 'g*')
+        axes[0].plot(t[left_walk_info['FF_walking']], left_walk_info['Vm'][left_walk_info['FF_walking']], 'k.')
+        axes[0].grid(True)
+        axes[0].set_ylabel('Left |V| [m/s]')
+        axes[0].set_xlabel('time [s]')
+        axes[0].legend(['|V|', 'FFs', 'Walking'])
+        axes[0].set_title('Foot Fall detection using opposite shoe speed')
 
-    axes[1].plot(t, right_walk_info['Vm'])
-    axes[1].plot(t[right_walk_info['FF']], right_walk_info['Vm'][right_walk_info['FF']], 'g*')
-    axes[1].plot(t[right_walk_info['FF_walking']], right_walk_info['Vm'][right_walk_info['FF_walking']], 'k.')
-    axes[1].grid(True)
-    axes[1].set_ylabel('Right |V| [m/s]')
-    axes[1].set_xlabel('time [s]')
+        axes[1].plot(t, right_walk_info['Vm'])
+        axes[1].plot(t[right_walk_info['FF']], right_walk_info['Vm'][right_walk_info['FF']], 'g*')
+        axes[1].plot(t[right_walk_info['FF_walking']], right_walk_info['Vm'][right_walk_info['FF_walking']], 'k.')
+        axes[1].grid(True)
+        axes[1].set_ylabel('Right |V| [m/s]')
+        axes[1].set_xlabel('time [s]')
 
     if plot_details:
         left_az_mag = np.sqrt(np.sum(left_walk_info['Anz'] ** 2, axis=1))
@@ -1224,3 +1235,237 @@ def compute_position_two_imus(leftWb: np.ndarray, leftAb: np.ndarray,
         axes[1].set_xlabel('time [s]')
 
     return left_walk_info, right_walk_info
+
+
+def _empty_steps() -> Dict[str, Any]:
+    return {
+        'leading_foot': np.array([], dtype='<U5'),
+        'start_idx': np.array([], dtype=int),
+        'end_idx': np.array([], dtype=int),
+        'time': np.array([]),
+        'length': np.array([]),
+        'width': np.array([]),
+        'left_xy': np.zeros((0, 2)),
+        'right_xy': np.zeros((0, 2)),
+        'anchor': None,
+        'anchor_quality': np.inf,
+        'n_same_foot_skips': 0,
+        'n_too_slow': 0,
+    }
+
+
+def _moving_contacts(P: np.ndarray, ff: np.ndarray, threshold: float) -> np.ndarray:
+    """Mark footfalls whose foot travelled more than threshold since its own
+    previous footfall (i.e. contacts that end a real swing, not standing)."""
+    moving = np.zeros(len(ff), dtype=bool)
+    moving[1:] = np.linalg.norm(np.diff(P[ff, :2], axis=0), axis=1) > threshold
+    # foot_fall() unconditionally appends a footfall at the last sample; it is
+    # not a real contact, so never let it count as a swing landing
+    moving[ff == len(P) - 1] = False
+    return moving
+
+
+def step_segmentation(left_info: Dict[str, Any], right_info: Dict[str, Any],
+                      period: float,
+                      initial_separation: float = 0.3,
+                      max_step_seconds: float = 2.0,
+                      min_stride_displacement: float = 0.2) -> Dict[str, Any]:
+    """Segment steps (opposite-foot footfall to footfall) from a two-IMU bout.
+
+    A step runs from a footfall of one foot to the next footfall of the
+    *other* foot — half a gait cycle. This is the cross-foot complement of
+    stride_segmentation(), which treats each foot independently. Both feet
+    must be sample-synchronized (as produced by compute_position_two_imus).
+
+    Step *time* needs only the two footfall trains and is the most reliable
+    output. Step *length* and *width* require both feet in a common spatial
+    frame, which foot-mounted IMUs cannot observe directly; they are computed
+    under two stated assumptions:
+
+    - Each foot's trajectory is rotated so its travel heading (first to last
+      moving contact) points +x (valid for straight walking bouts).
+    - At the anchor — a standing moment with footfalls of both feet close
+      together in time and the feet facing the same way — the feet are side
+      by side, `initial_separation` metres apart across the line of facing
+      (the facing comes from the feet's yaw, so a stance after the subject
+      has turned still anchors correctly). The anchor is chosen as close in
+      time to the walking block as possible, because position drift
+      accumulates in un-ZUPTed gaps between standing and walking. The *mean*
+      step width inherits the separation assumption wholesale (changing the
+      argument shifts every width by the same amount); width *variability*
+      across steps is real signal. The left/right *split* of step length
+      inherits the forward part of the anchor error; the mean of a
+      consecutive L+R step pair equals the stride length and is anchor-free.
+
+    A step is recorded for each swing landing (a contact whose foot moved
+    more than min_stride_displacement since its own previous contact), paired
+    with the opposite foot's most recent contact — which may be a standing
+    contact, so gait-initiation steps are included. Two same-foot swing
+    landings in a row (a missed contact on the other side) and pairs further
+    apart than max_step_seconds are counted in the diagnostics instead.
+    Standing footfalls never form steps themselves; they serve as trailing
+    contacts and anchor candidates.
+
+    Parameters:
+    -----------
+    left_info, right_info : dict
+        Outputs of compute_position_two_imus() (need 'FF_walking' and 'P')
+    period : float
+        Sampling period in seconds
+    initial_separation : float
+        Assumed lateral distance between the feet when standing (default 0.3 m)
+    max_step_seconds : float
+        Footfall pairs further apart than this do not form a step
+    min_stride_displacement : float
+        A contact counts as a swing landing when its foot moved at least this
+        far (m) since its own previous contact
+
+    Returns:
+    --------
+    dict
+        'leading_foot' : 'left'/'right' per step (the foot that lands)
+        'start_idx', 'end_idx' : sample indices of the trailing and leading
+            contacts
+        'time' : step duration in seconds
+        'length' : forward distance between the successive foot placements
+        'width' : lateral separation of the placements, signed left minus
+            right (negative indicates crossover)
+        'left_xy', 'right_xy' : both trajectories in the common frame
+            (forward, lateral)
+        'anchor' : (left_idx, right_idx) of the standing pair that anchors
+            the common frame, or None if none was found (frames are then
+            anchored at the first contacts, and lengths/widths are suspect)
+        'anchor_quality' : the longest un-ZUPTed interval (s) separating the
+            anchor from the walking block — position drift grows with it, so
+            treat the length split and the mean width as unreliable when this
+            exceeds a normal stride time (say > 2 s)
+        'n_same_foot_skips', 'n_too_slow' : counts of swing contacts that did
+            not form steps
+    """
+    left_ff = np.where(left_info['FF_walking'])[0]
+    right_ff = np.where(right_info['FF_walking'])[0]
+    if len(left_ff) == 0 or len(right_ff) == 0:
+        return _empty_steps()
+
+    P_left, P_right = left_info['P'], right_info['P']
+    left_moving = _moving_contacts(P_left, left_ff, min_stride_displacement)
+    right_moving = _moving_contacts(P_right, right_ff, min_stride_displacement)
+
+    # Interleave the two footfall trains on the shared timeline
+    events = np.concatenate([left_ff, right_ff])
+    is_left = np.concatenate([np.ones(len(left_ff), bool), np.zeros(len(right_ff), bool)])
+    moving = np.concatenate([left_moving, right_moving])
+    order = np.argsort(events, kind='stable')
+    events, is_left, moving = events[order], is_left[order], moving[order]
+
+    steps = _empty_steps()
+
+    # Pair each swing landing with the opposite foot's most recent contact
+    max_step_samples = int(max_step_seconds / period)
+    pairs = []  # (trail event position, lead event position)
+    last_contact = {True: None, False: None}   # per foot, by is_left
+    last_swing_is_left = None
+    for k in range(len(events)):
+        if moving[k]:
+            trail = last_contact[not is_left[k]]
+            if last_swing_is_left == is_left[k]:
+                steps['n_same_foot_skips'] += 1
+            elif trail is not None and events[k] - events[trail] > max_step_samples:
+                steps['n_too_slow'] += 1
+            elif trail is not None:
+                pairs.append((trail, k))
+            last_swing_is_left = is_left[k]
+        last_contact[is_left[k]] = k
+    if not pairs:
+        return steps
+
+    # Rotate each foot's trajectory by its travel heading (first to last
+    # swing contact) so forward is +x for both, and derive the foot's facing
+    # in that frame. The sensor is mounted at an arbitrary angle about
+    # vertical, so its yaw is calibrated against the swing contacts, where
+    # the foot faces the direction of travel (facing 0 in the common frame).
+    def to_common(info, ff, moving_mask):
+        P = info['P']
+        swing = ff[moving_mask]
+        a, b = (swing[0], swing[-1]) if len(swing) >= 2 else (0, len(P) - 1)
+        heading = np.arctan2(P[b, 1] - P[a, 1], P[b, 0] - P[a, 0])
+        XY = np.column_stack(rotate_angle(P[:, 0], P[:, 1], -heading))
+        yaw = np.exp(1j * info['euler'][:, 2])
+        mounting = np.angle(np.mean(yaw[swing])) if len(swing) else heading
+        facing = np.angle(yaw * np.exp(-1j * mounting))
+        return XY, facing
+
+    left_xy, left_yaw = to_common(left_info, left_ff, left_moving)
+    right_xy, right_yaw = to_common(right_info, right_ff, right_moving)
+
+    # Anchor the common frame at a standing pair: a standing footfall of each
+    # foot with the feet facing the same way (both settled — the subject may
+    # be turned away from the travel direction, the separation vector is
+    # oriented by the feet's facing). Position error accumulates with the
+    # duration of un-ZUPTed intervals between contacts, so score each
+    # candidate by the longest inter-contact interval on the chain linking it
+    # to the walking block (plus the pair's own time separation) and take the
+    # best.
+    MAX_ANCHOR_FOOT_YAW_DIFF = 0.5  # rad between the two feet at the anchor
+
+    def drift_to_walk(ff, moving_mask):
+        """Longest un-ZUPTed interval (s) between each contact and the
+        walking block of its foot."""
+        out = np.full(len(ff), np.inf)
+        swing_pos = np.where(moving_mask)[0]
+        if len(swing_pos) == 0:
+            return out
+        lo, hi = swing_pos[0], swing_pos[-1]
+        for i in range(len(ff)):
+            if lo <= i <= hi:
+                out[i] = 0.0
+            elif i < lo:
+                out[i] = np.max(np.diff(ff[i:lo + 1])) * period
+            else:
+                out[i] = np.max(np.diff(ff[hi:i + 1])) * period
+        return out
+
+    left_drift = drift_to_walk(left_ff, left_moving)
+    right_drift = drift_to_walk(right_ff, right_moving)
+    anchor = None
+    best = np.inf
+    for il, dl in zip(left_ff[~left_moving], left_drift[~left_moving]):
+        for ir, dr in zip(right_ff[~right_moving], right_drift[~right_moving]):
+            if np.abs(np.angle(np.exp(1j * (left_yaw[il] - right_yaw[ir])))) > \
+                    MAX_ANCHOR_FOOT_YAW_DIFF:
+                continue
+            score = max(dl, dr) + abs(il - ir) * period
+            if score < best:
+                best, anchor = score, (int(il), int(ir))
+    steps['anchor'] = anchor
+    steps['anchor_quality'] = float(best)
+    anchor_left, anchor_right = anchor if anchor else (left_ff[0], right_ff[0])
+
+    # At the anchor the feet are side by side across the line of facing:
+    # left foot a half-separation to the facing's left, right foot to its
+    # right. (When the anchor stance faces the travel direction this reduces
+    # to equal forward position and a +/- lateral offset.)
+    facing = np.angle(np.exp(1j * left_yaw[anchor_left]) +
+                      np.exp(1j * right_yaw[anchor_right]))
+    leftward = np.array([-np.sin(facing), np.cos(facing)])
+    left_xy = left_xy - left_xy[anchor_left] + leftward * initial_separation / 2
+    right_xy = right_xy - right_xy[anchor_right] - leftward * initial_separation / 2
+
+    records = []
+    for k0, k1 in pairs:
+        i0, i1 = events[k0], events[k1]
+        lead_is_left = is_left[k1]
+        lead_xy, trail_xy = (left_xy, right_xy) if lead_is_left else (right_xy, left_xy)
+        iL, iR = (i1, i0) if lead_is_left else (i0, i1)
+        records.append(('left' if lead_is_left else 'right', i0, i1,
+                        (i1 - i0) * period,
+                        lead_xy[i1, 0] - trail_xy[i0, 0],
+                        left_xy[iL, 1] - right_xy[iR, 1]))
+
+    foot, start_idx, end_idx, time, length, width = zip(*records)
+    steps.update(leading_foot=np.array(foot),
+                 start_idx=np.array(start_idx), end_idx=np.array(end_idx),
+                 time=np.array(time), length=np.array(length),
+                 width=np.array(width),
+                 left_xy=left_xy, right_xy=right_xy)
+    return steps

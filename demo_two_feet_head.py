@@ -6,7 +6,7 @@ This script:
 2. Detects walking bouts by finding quiet periods that bound active walking
 3. Shows full trajectory with bout locations highlighted
 4. Interactive bout selection with accelerometer visualization
-5. Computes step speed (distance / duration) for each bout
+5. Computes stride speed (distance / duration) for each bout
 6. Analyzes head motion during walking bouts
 7. Caches results to pkl file
 """
@@ -221,42 +221,42 @@ def plot_rotation_corrected_trajectories(left_walk_info: dict, right_walk_info: 
     return fig
 
 
-def compute_step_metrics(strides: dict) -> dict:
-    """Compute step-level metrics from stride segmentation output.
+def compute_stride_metrics(strides: dict) -> dict:
+    """Compute stride-level metrics from stride segmentation output.
 
-    Handles empty strides (no steps detected) by returning zeros/empty arrays.
+    Handles empty strides (no strides detected) by returning zeros/empty arrays.
     """
-    step_speeds = strides['frwd_speed']
-    step_durations = strides['time']
+    stride_speeds = strides['frwd_speed']
+    stride_durations = strides['time']
 
-    # Handle empty strides (no steps detected)
-    if len(step_speeds) == 0:
+    # Handle empty strides (no strides detected)
+    if len(stride_speeds) == 0:
         return {
-            'step_lengths': np.array([]),
-            'step_durations': np.array([]),
-            'step_speeds': np.array([]),
+            'stride_lengths': np.array([]),
+            'stride_durations': np.array([]),
+            'stride_speeds': np.array([]),
             'mean_speed': 0.0,
             'std_speed': 0.0,
             'mean_length': 0.0,
             'std_length': 0.0,
             'mean_duration': 0.0,
             'std_duration': 0.0,
-            'n_steps': 0
+            'n_strides': 0
         }
 
-    step_lengths = strides['frwd'][-1, :]
+    stride_lengths = strides['frwd'][-1, :]
 
     return {
-        'step_lengths': step_lengths,
-        'step_durations': step_durations,
-        'step_speeds': step_speeds,
-        'mean_speed': np.mean(step_speeds),
-        'std_speed': np.std(step_speeds),
-        'mean_length': np.mean(step_lengths),
-        'std_length': np.std(step_lengths),
-        'mean_duration': np.mean(step_durations),
-        'std_duration': np.std(step_durations),
-        'n_steps': len(step_speeds)
+        'stride_lengths': stride_lengths,
+        'stride_durations': stride_durations,
+        'stride_speeds': stride_speeds,
+        'mean_speed': np.mean(stride_speeds),
+        'std_speed': np.std(stride_speeds),
+        'mean_length': np.mean(stride_lengths),
+        'std_length': np.std(stride_lengths),
+        'mean_duration': np.mean(stride_durations),
+        'std_duration': np.std(stride_durations),
+        'n_strides': len(stride_speeds)
     }
 
 
@@ -540,8 +540,8 @@ def process_walking_bout(bout: WalkingBout,
     left_strides = imu.stride_segmentation(left_walk_info, period)
     right_strides = imu.stride_segmentation(right_walk_info, period)
 
-    left_metrics = compute_step_metrics(left_strides)
-    right_metrics = compute_step_metrics(right_strides)
+    left_metrics = compute_stride_metrics(left_strides)
+    right_metrics = compute_stride_metrics(right_strides)
     head_metrics = analyze_head_motion(head_bout, period)
 
     # Compute total distance travelled for each foot
@@ -642,16 +642,16 @@ def plot_bout_summary(bout_name: str, left_metrics: dict, right_metrics: dict,
     ax = axes[1, 0]
     # Compute shared bin edges for comparable histograms
     all_speeds = []
-    if left_metrics['n_steps'] > 0:
-        all_speeds.extend(left_metrics['step_speeds'])
-    if right_metrics['n_steps'] > 0:
-        all_speeds.extend(right_metrics['step_speeds'])
+    if left_metrics['n_strides'] > 0:
+        all_speeds.extend(left_metrics['stride_speeds'])
+    if right_metrics['n_strides'] > 0:
+        all_speeds.extend(right_metrics['stride_speeds'])
     if all_speeds:
         bins = np.linspace(min(all_speeds), max(all_speeds), 46)  # 45 bins = 46 edges
-        if left_metrics['n_steps'] > 0:
-            ax.hist(left_metrics['step_speeds'], bins=bins, alpha=0.5, label='Left', color='blue')
-        if right_metrics['n_steps'] > 0:
-            ax.hist(right_metrics['step_speeds'], bins=bins, alpha=0.5, label='Right', color='red')
+        if left_metrics['n_strides'] > 0:
+            ax.hist(left_metrics['stride_speeds'], bins=bins, alpha=0.5, label='Left', color='blue')
+        if right_metrics['n_strides'] > 0:
+            ax.hist(right_metrics['stride_speeds'], bins=bins, alpha=0.5, label='Right', color='red')
     ax.set_xlabel('Step Speed [m/s]')
     ax.set_ylabel('Count')
     ax.set_title('Step Speed Distribution')
@@ -669,7 +669,7 @@ def plot_bout_summary(bout_name: str, left_metrics: dict, right_metrics: dict,
         f"  Mean: {head_metrics['accel_mean']:.2f} m/s²\n"
         f"  Std: {head_metrics['accel_std']:.2f} m/s²\n"
         f"  Max: {head_metrics['accel_max']:.2f} m/s²\n\n"
-        f"Steps: L={left_metrics['n_steps']}, R={right_metrics['n_steps']}"
+        f"Strides: L={left_metrics['n_strides']}, R={right_metrics['n_strides']}"
     )
     ax.text(0.1, 0.5, metrics_text, transform=ax.transAxes, fontsize=11,
             verticalalignment='center', fontfamily='monospace')
@@ -688,10 +688,14 @@ if __name__ == '__main__':
     # =============================================================================
     # File paths
     # =============================================================================
-    HEAD_FILE = '/Users/jeremy/Library/CloudStorage/OneDrive-UniversityofCalgary/Project 2025 CC Balance/Pilot testing/January 5th Pilot Testing/20260105-141716_Head_013120.h5'
-    LEFT_FILE = '/Users/jeremy/Library/CloudStorage/OneDrive-UniversityofCalgary/Project 2025 CC Balance/Pilot testing/January 5th Pilot Testing/20260105-141714_LeftFoot_013087.h5'
-    RIGHT_FILE = '/Users/jeremy/Library/CloudStorage/OneDrive-UniversityofCalgary/Project 2025 CC Balance/Pilot testing/January 5th Pilot Testing/20260105-141717_RightFoot_013097.h5'
-    HAND_FILE = '/Users/jeremy/Library/CloudStorage/OneDrive-UniversityofCalgary/Project 2025 CC Balance/Pilot testing/January 5th Pilot Testing/20260105-141719_Hand_013056.h5'
+    # Data directory: override with the STRIDE_DATA_DIR environment variable
+    # (e.g. on Colab, point it at the uploaded/mounted copy of the recordings)
+    DATA_DIR = os.environ.get('STRIDE_DATA_DIR',
+                              '/Users/jeremy/Downloads/January 5th Pilot Testing')
+    HEAD_FILE = os.path.join(DATA_DIR, '20260105-141716_Head_013120.h5')
+    LEFT_FILE = os.path.join(DATA_DIR, '20260105-141714_LeftFoot_013087.h5')
+    RIGHT_FILE = os.path.join(DATA_DIR, '20260105-141717_RightFoot_013097.h5')
+    HAND_FILE = os.path.join(DATA_DIR, '20260105-141719_Hand_013056.h5')
     # =============================================================================
     # Walking bout target times (January 5, 2026)
     # Each tuple: (name, target_time, search_window_seconds)
@@ -865,11 +869,11 @@ if __name__ == '__main__':
             right_metrics = result['right_metrics']
             head_metrics = result['head_metrics']
 
-            print(f"  Left steps: {left_metrics['n_steps']}, "
+            print(f"  Left strides: {left_metrics['n_strides']}, "
                   f"mean speed: {left_metrics['mean_speed']:.2f} m/s, "
                   f"mean length: {left_metrics['mean_length']:.2f} m, "
                   f"total dist: {result['left_total_distance']:.2f} m")
-            print(f"  Right steps: {right_metrics['n_steps']}, "
+            print(f"  Right strides: {right_metrics['n_strides']}, "
                   f"mean speed: {right_metrics['mean_speed']:.2f} m/s, "
                   f"mean length: {right_metrics['mean_length']:.2f} m, "
                   f"total dist: {result['right_total_distance']:.2f} m")
@@ -880,8 +884,8 @@ if __name__ == '__main__':
                 **result
             }
 
-            # Plot stride patterns for this bout (skip if no steps detected)
-            if left_metrics['n_steps'] > 0 and right_metrics['n_steps'] > 0:
+            # Plot stride patterns for this bout (skip if no strides detected)
+            if left_metrics['n_strides'] > 0 and right_metrics['n_strides'] > 0:
                 fig, axes = plt.subplots(1, 2, figsize=(14, 6))
                 plt.sca(axes[0])
                 imu.plt_ltrl_frwd_strides(result['left_strides'], show=False)
@@ -891,7 +895,7 @@ if __name__ == '__main__':
                 axes[1].set_title(f'Right Foot - {sel.name}')
                 plt.tight_layout()
             else:
-                print(f"  WARNING: No steps detected, skipping stride plots")
+                print(f"  WARNING: No strides detected, skipping stride plots")
 
             # Plot rotation-corrected trajectories (both feet aligned to Y axis)
             plot_rotation_corrected_trajectories(
@@ -981,8 +985,8 @@ if __name__ == '__main__':
         axes[1, 0].set_title('Head Angular Velocity by Bout')
         axes[1, 0].grid(True, axis='y')
 
-        left_counts = [bout_results[b]['left_metrics']['n_steps'] for b in bout_names]
-        right_counts = [bout_results[b]['right_metrics']['n_steps'] for b in bout_names]
+        left_counts = [bout_results[b]['left_metrics']['n_strides'] for b in bout_names]
+        right_counts = [bout_results[b]['right_metrics']['n_strides'] for b in bout_names]
 
         axes[1, 1].bar(x - width/2, left_counts, width, label='Left', alpha=0.7)
         axes[1, 1].bar(x + width/2, right_counts, width, label='Right', alpha=0.7)
@@ -1003,7 +1007,7 @@ if __name__ == '__main__':
             sel = r['selection']
             print(f"{name:<15} {sel.start_datetime.strftime('%H:%M:%S'):<12} "
                   f"{sel.duration_seconds:>10.1f} "
-                  f"{r['left_metrics']['n_steps']:>8} {r['right_metrics']['n_steps']:>8} "
+                  f"{r['left_metrics']['n_strides']:>8} {r['right_metrics']['n_strides']:>8} "
                   f"{r['left_metrics']['mean_speed']:>10.2f} {r['right_metrics']['mean_speed']:>10.2f} "
                   f"{r['left_total_distance']:>10.2f} {r['right_total_distance']:>10.2f}")
 

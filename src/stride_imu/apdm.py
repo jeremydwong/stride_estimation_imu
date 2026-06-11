@@ -1,6 +1,6 @@
 import numpy as np
 import h5py
-from typing import Tuple, Optional, Any, Union, List
+from typing import Tuple, Optional, Any, Union, List, Dict
 from dataclasses import dataclass
 from datetime import datetime, time as dt_time, timezone, timedelta
 import pandas as pd
@@ -546,7 +546,34 @@ def getdata(Win: np.ndarray, A: np.ndarray, period: float, section_seconds: Opti
     return W, A, static_period, M, time_datetime, time_elapsed_samples
 
 
-def load_imu_recording(file_path: str, orientation: Optional[int] = None) -> ImuRecording:
+def list_sensors(file_path: str) -> Dict[str, str]:
+    """List the sensors contained in an APDM HDF5 file.
+
+    Multi-sensor recordings (e.g. a full session logged through one access
+    point) store every monitor under /Sensors. Returns a mapping from sensor
+    ID (e.g. 'XI-021156') to its configured 'Label 0' string (e.g.
+    'left_foot_a'; empty string if unlabeled).
+
+    Parameters:
+    -----------
+    file_path : str
+        Path to APDM HDF5 file
+
+    Returns:
+    --------
+    Dict[str, str]
+        {sensor_id: label}
+    """
+    with h5py.File(file_path, 'r') as f:
+        sensors = {}
+        for sid in f['Sensors']:
+            label = f['Sensors'][sid]['Configuration'].attrs.get('Label 0', b'')
+            sensors[sid] = label.decode() if isinstance(label, bytes) else str(label)
+        return sensors
+
+
+def load_imu_recording(file_path: str, orientation: Optional[int] = None,
+                       sensor_id: Optional[str] = None) -> ImuRecording:
     """Primary API for loading APDM sensor data from an HDF5 file.
 
     Opens the file once, reads all sensor channels (accelerometer, gyroscope,
@@ -559,6 +586,9 @@ def load_imu_recording(file_path: str, orientation: Optional[int] = None) -> Imu
         Path to APDM HDF5 file
     orientation : int, optional
         Orientation code (default: LED_UP_RIGHT_FRWD = 1)
+    sensor_id : str, optional
+        Which sensor to read from a multi-sensor file (see list_sensors()).
+        Default: the first sensor in the file.
 
     Returns:
     --------
@@ -567,7 +597,12 @@ def load_imu_recording(file_path: str, orientation: Optional[int] = None) -> Imu
     """
     with h5py.File(file_path, 'r') as f:
         l1 = 'Sensors'
-        l2_sensorid = list(f[l1].keys())[0]
+        if sensor_id is None:
+            l2_sensorid = list(f[l1].keys())[0]
+        elif sensor_id in f[l1]:
+            l2_sensorid = sensor_id
+        else:
+            raise ValueError(f"Sensor {sensor_id!r} not in file; available: {list(f[l1].keys())}")
         raw_time = np.asarray(f[l1][l2_sensorid]['Time'][()])  # type: ignore[index]
         freq = float(f[l1][l2_sensorid]['Configuration'].attrs['Sample Rate'])
         period = 1.0 / freq

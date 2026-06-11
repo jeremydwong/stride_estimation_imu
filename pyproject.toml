@@ -5,6 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "stride-imu"
 version = "0.1"
+requires-python = ">=3.10,<3.13"
 dependencies = [
     "numpy==1.26.4",
     "scipy==1.11.4",
