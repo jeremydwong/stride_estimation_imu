@@ -54,8 +54,8 @@ if __name__ == '__main__':
     left_strides = imu.stride_segmentation(left_walk_info, PERIOD)
     right_strides = imu.stride_segmentation(right_walk_info, PERIOD)
 
-    print(f"\nFound {left_strides['frwd'].shape[1] if 'frwd' in left_strides else 0} left strides")
-    print(f"Found {right_strides['frwd'].shape[1] if 'frwd' in right_strides else 0} right strides")
+    print(f"\nFound {left_strides.frwd.shape[1]} left strides")
+    print(f"Found {right_strides.frwd.shape[1]} right strides")
 
     # Load MATLAB reference data if available and compare
     if os.path.exists(MATLAB_FILE):
@@ -93,26 +93,26 @@ if __name__ == '__main__':
         # Left foot comparisons
         if 'left_walk_info' in matlab_data:
             matlab_left = matlab_data['left_walk_info']
-            if 'P' in left_walk_info and 'P' in matlab_left.dtype.names:
-                fig = plot_comparison(left_walk_info['P'], matlab_left['P'][0, 0],
+            if hasattr(left_walk_info, 'P') and 'P' in matlab_left.dtype.names:
+                fig = plot_comparison(left_walk_info.P, matlab_left['P'][0, 0],
                                     'left_walk_info.P', ylabel='Position [m]')
                 fig.suptitle('Left Foot Position Comparison', fontsize=14, y=1.00)
 
-            if 'V' in left_walk_info and 'V' in matlab_left.dtype.names:
-                fig = plot_comparison(left_walk_info['V'], matlab_left['V'][0, 0],
+            if hasattr(left_walk_info, 'V') and 'V' in matlab_left.dtype.names:
+                fig = plot_comparison(left_walk_info.V, matlab_left['V'][0, 0],
                                     'left_walk_info.V', ylabel='Velocity [m/s]')
                 fig.suptitle('Left Foot Velocity Comparison', fontsize=14, y=1.00)
 
         # Right foot comparisons
         if 'right_walk_info' in matlab_data:
             matlab_right = matlab_data['right_walk_info']
-            if 'P' in right_walk_info and 'P' in matlab_right.dtype.names:
-                fig = plot_comparison(right_walk_info['P'], matlab_right['P'][0, 0],
+            if hasattr(right_walk_info, 'P') and 'P' in matlab_right.dtype.names:
+                fig = plot_comparison(right_walk_info.P, matlab_right['P'][0, 0],
                                     'right_walk_info.P', ylabel='Position [m]')
                 fig.suptitle('Right Foot Position Comparison', fontsize=14, y=1.00)
 
-            if 'V' in right_walk_info and 'V' in matlab_right.dtype.names:
-                fig = plot_comparison(right_walk_info['V'], matlab_right['V'][0, 0],
+            if hasattr(right_walk_info, 'V') and 'V' in matlab_right.dtype.names:
+                fig = plot_comparison(right_walk_info.V, matlab_right['V'][0, 0],
                                     'right_walk_info.V', ylabel='Velocity [m/s]')
                 fig.suptitle('Right Foot Velocity Comparison', fontsize=14, y=1.00)
 

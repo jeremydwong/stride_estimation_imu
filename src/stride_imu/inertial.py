@@ -5,6 +5,12 @@ from dataclasses import dataclass
 
 GRAVITY = 9.80297286843
 
+# Default foot-speed thresholds for snug_start (m/s): the first step of a bout is
+# snugged to the velocity valley before the first swing that crosses *_HIGH,
+# stopping at a local minimum or when |V| falls to *_LOW.
+DEFAULT_START_FOOTSPEED_HIGH = 1.25
+DEFAULT_START_FOOTSPEED_LOW = 0.2
+
 
 @dataclass
 class WalkingBout:
@@ -14,6 +20,111 @@ class WalkingBout:
     duration_seconds: float
     quiet_before_idx: int  # Start of quiet period before this bout
     quiet_after_idx: int   # End of quiet period after this bout
+
+
+@dataclass
+class FootTrajectory:
+    """Per-foot output of inertial mechanization (``compute_position`` /
+    ``compute_position_two_imus``): the full time-series state of one foot over
+    a recording of N samples. Pure data container — no methods, on purpose.
+
+    A note on the names: they are inherited verbatim from the original MATLAB
+    port and several are opaque and frankly bad (``FF``, ``An``, ``Anz``,
+    ``Vm`` ...). They are kept as-is so existing code and people familiar with
+    the previous codebase keep reading the same names; rely on the documented
+    meanings below rather than the names themselves. Renaming is a separate,
+    later job.
+
+    Footfall vs. stance — two DIFFERENT arrays, routinely confused:
+      * ``FF`` / ``FF_walking`` are *sparse*: a single ``True`` at the one
+        instant the foot is judged to plant (the arg-min angular-rate sample
+        within a stance). One ``True`` per contact.
+      * ``stationary_periods`` is *dense*: ``True`` for every low-motion sample,
+        i.e. a contiguous run of ``True`` spanning each whole stance plateau —
+        the "block of 1s per stance" that ``FF`` is often mistaken for.
+
+    Fields (all indexed along axis 0 by sample; N = number of samples):
+        FF : (N,) bool
+            Footfall flags. Exactly one True per detected contact (the
+            arg-min angular-rate sample inside a stance). NOT a run.
+        FF_walking : (N,) bool
+            FF restricted to the detected walking section (between the first
+            and last walking footfall). In ``compute_position_two_imus`` this
+            is currently a plain copy of FF.
+        stationary_periods : (N,) bool, or None
+            True over every low-motion (stance) sample → one True-run per
+            stance plateau. None only when a precomputed FF was passed to
+            ``compute_position`` so stance was never detected.
+        P : (N, 3) float
+            Position in the navigation frame [m]. [:, :2] is horizontal (x, y);
+            [:, 2] is elevation. Begins at the origin.
+        V : (N, 3) float
+            Velocity in the navigation frame [m/s] (ZUPT-corrected).
+        Vm : (N,) float
+            Speed magnitude [m/s]. Horizontal sqrt(Vx²+Vy²) from
+            ``compute_position``; full 3-D speed from
+            ``compute_position_two_imus``.
+        euler : (N, 3) float
+            Orientation [roll, pitch, yaw] in radians.
+        quaternion : (N, 4) float
+            Orientation quaternion [w, x, y, z].
+        An : (N, 3) float
+            Body acceleration rotated into the navigation frame [m/s²]
+            (gravity not removed).
+        Anz : (N, 3) float
+            ``An`` after zero-velocity-update drift correction [m/s²]
+            (integrates to ~0 velocity across each stance). V and P derive
+            from this.
+        A : (N, 3) float
+            Raw body-frame acceleration fed in [m/s²].
+        W : (N, 3) float
+            Raw body-frame angular velocity fed in [rad/sample].
+    """
+    FF: np.ndarray
+    FF_walking: np.ndarray
+    stationary_periods: Optional[np.ndarray]
+    P: np.ndarray
+    V: np.ndarray
+    Vm: np.ndarray
+    euler: np.ndarray
+    quaternion: np.ndarray
+    An: np.ndarray
+    Anz: np.ndarray
+    A: np.ndarray
+    W: np.ndarray
+
+
+@dataclass
+class Strides:
+    """Per-foot stride-segmentation output (``stride_segmentation`` /
+    ``get_strides``): one entry per detected stride, footfall to the next
+    footfall of the SAME foot. Pure data container — no methods, on purpose.
+
+    The three trajectory arrays are (n_samples, n_strides): column j is stride
+    j, rotated into the stride's local forward/lateral frame, re-origined so the
+    stride starts at 0, then held flat (zero-velocity pad) after its last sample
+    out to the longest stride's length. The scalar arrays are (n_strides,).
+
+    Fields:
+        frwd : (n_samples, n_strides) float
+            Forward position along the stride's local walking axis [m].
+        ltrl : (n_samples, n_strides) float
+            Lateral position [m] (carried across strides to trace the foot).
+        elev : (n_samples, n_strides) float
+            Elevation [m], re-origined per stride.
+        start_end : (2, n_strides) float
+            [start; end] sample index of each stride into the source recording.
+        time : (n_strides,) float
+            Stride duration [s].
+        frwd_speed : (n_strides,) float
+            Forward speed = stride length / duration [m/s].
+    """
+    frwd: np.ndarray
+    ltrl: np.ndarray
+    elev: np.ndarray
+    start_end: np.ndarray
+    time: np.ndarray
+    frwd_speed: np.ndarray
 
 
 def detect_quiet_periods(W: np.ndarray, A: np.ndarray, period: float,
@@ -315,7 +426,7 @@ def zero_velocity_updates(i: int, FF: np.ndarray, An: np.ndarray, Anz: np.ndarra
     return last_footfall
 
 
-def compute_position(W: np.ndarray, A: np.ndarray, period: float, USE_KF: int = 1, W_FF: Optional[float] = None, A_FF: Optional[float] = None, T_FF: Optional[float] = None, MAX_T_FF: Optional[float] = None, FF: Optional[np.ndarray] = None) -> Dict[str, Any]:
+def compute_position(W: np.ndarray, A: np.ndarray, period: float, USE_KF: int = 1, W_FF: Optional[float] = None, A_FF: Optional[float] = None, T_FF: Optional[float] = None, MAX_T_FF: Optional[float] = None, FF: Optional[np.ndarray] = None) -> 'FootTrajectory':
     """Perform inertial mechanization on a single foot IMU recording.
 
     Integrates angular velocity to track orientation (as quaternions),
@@ -357,6 +468,7 @@ def compute_position(W: np.ndarray, A: np.ndarray, period: float, USE_KF: int = 
     N = W.shape[0]
     t = np.arange(N) * period
     accel_phi, accel_theta = acc_tilt(A)
+    stationary_periods = None
     if FF is None:
         FF, stationary_periods = foot_fall(W, A, period, W_FF, A_FF, T_FF, MAX_T_FF)
     result = {'FF': FF}
@@ -369,7 +481,13 @@ def compute_position(W: np.ndarray, A: np.ndarray, period: float, USE_KF: int = 
 
     #kalman filter init
     quaternion[0, :],P,Q,R = kalman_filter_tilt(period,None, None ,None, None)
-    
+    # The loop below starts at i=1, so without this An[0] stays [0,0,0]. Over the
+    # short first-stride ZUPT window (often ~8-12 samples) that single zero biases
+    # the gravity estimate ~10% low (|g|: 9.803*(n-1)/n) and injects a spurious
+    # -g impulse at Anz[0]. Rotate A[0] by the init orientation like every other
+    # sample so the first stride averages real stance.
+    An[0, :] = (qua2rot(quaternion[0, :]) @ A[0:1, :].T).T
+
     for i in range(1, N):
         quaternion[i, :] = qua_est(W[i, :], quaternion[i - 1, :])
         rotation_matrix = qua2rot(quaternion[i, :])
@@ -395,7 +513,8 @@ def compute_position(W: np.ndarray, A: np.ndarray, period: float, USE_KF: int = 
         result['FF_walking'] = result['FF']
     P = np.cumsum(V, axis=0) * period
     result['P'] = P
-    return result
+    result['stationary_periods'] = stationary_periods
+    return FootTrajectory(**result)
 
 def detect_walking_section(walk_info: Dict[str, Any], MIN_WALK_SPEED: float = 2.0) -> np.ndarray:
     """Filter footfalls to only the walking portion of a recording.
@@ -406,7 +525,7 @@ def detect_walking_section(walk_info: Dict[str, Any], MIN_WALK_SPEED: float = 2.
 
     Parameters:
     -----------
-    walk_info : dict
+    walk_info : FootTrajectory
         Output of compute_position() (must contain 'FF' and 'Vm' keys)
     MIN_WALK_SPEED : float
         Minimum peak velocity to count as walking (default: 2.0 m/s)
@@ -416,22 +535,25 @@ def detect_walking_section(walk_info: Dict[str, Any], MIN_WALK_SPEED: float = 2.
     np.ndarray
         Boolean footfall array for the walking section only
     """   
-    FF = np.where(walk_info['FF'])[0]
-    Vm = walk_info['Vm']
+    # accept either the raw result dict (used internally, mid-construction) or a
+    # finished FootTrajectory
+    FF_arr = walk_info['FF'] if isinstance(walk_info, dict) else walk_info.FF
+    Vm = walk_info['Vm'] if isinstance(walk_info, dict) else walk_info.Vm
+    FF = np.where(FF_arr)[0]
     peaks_idx, _ = find_peaks(Vm, height=MIN_WALK_SPEED)
     FF_max_speed = np.zeros_like(Vm, dtype=bool)
     FF_max_speed[peaks_idx] = True
     median_vel = np.median(Vm[peaks_idx]) if peaks_idx.size > 0 else 0
     likely_walk_sections = np.where(Vm > median_vel * 0.90)[0]
     if likely_walk_sections.size == 0:
-        return walk_info['FF']
+        return FF_arr
     footfall_index = np.where((FF > likely_walk_sections[0]) & (FF < likely_walk_sections[-1]))[0]
     FF_walking = np.zeros_like(Vm, dtype=bool)
     if footfall_index.size > 0:
         FF_walking[FF[footfall_index[0]:footfall_index[-1] + 1]] = True
         return FF_walking
 
-def stride_segmentation(walk_info: Dict[str, Any], period: float, FILTER: int = 0, OUTLIER_SECTION_SECONDS: Optional[Any] = None) -> Dict[str, Any]:
+def stride_segmentation(walk_info: 'FootTrajectory', period: float, FILTER: int = 0, OUTLIER_SECTION_SECONDS: Optional[Any] = None) -> 'Strides':
     """Segment individual strides from a processed walking recording.
 
     Takes the output of compute_position() and identifies individual stride
@@ -441,7 +563,7 @@ def stride_segmentation(walk_info: Dict[str, Any], period: float, FILTER: int = 
 
     Parameters:
     -----------
-    walk_info : dict
+    walk_info : FootTrajectory
         Output of compute_position()
     period : float
         Sampling period in seconds
@@ -452,11 +574,9 @@ def stride_segmentation(walk_info: Dict[str, Any], period: float, FILTER: int = 
 
     Returns:
     --------
-    dict
-        Keys: 'frwd' (forward trajectory per stride), 'ltrl' (lateral),
-        'elev' (elevation), 'frwd_speed', 'time', 'stride_samples',
-        'foot_heading', 'frwd_swing', 'ltrl_swing', 'abs_frwd', 'abs_ltrl',
-        'theta', 'start_end', 'diff_foot_heading', 'frwd_speed_compensated'
+    Strides
+        Per-stride trajectories (frwd/ltrl/elev), indices (start_end) and
+        metrics (time, frwd_speed). See the Strides dataclass.
     """
     if OUTLIER_SECTION_SECONDS is not None:
         number_of_sections = np.atleast_2d(OUTLIER_SECTION_SECONDS).shape[0]
@@ -467,7 +587,7 @@ def stride_segmentation(walk_info: Dict[str, Any], period: float, FILTER: int = 
     else:
         OUTLIER_SECTION_SAMPLES = np.array([])
     MAX_FF_TIME = int(2 / period)
-    FF = np.where(walk_info['FF_walking'])[0]
+    FF = np.where(walk_info.FF_walking)[0]
     swing_start = FF[:-1]
     swing_finish = FF[1:]
     swing_time = np.diff(FF)
@@ -498,7 +618,7 @@ def get_strides(stride_start, stride_end, walk_info, PERIOD, FILTER, OUTLIER_SEC
         Start indices of strides
     stride_end : array-like
         End indices of strides
-    walk_info : dict
+    walk_info : FootTrajectory
         Dictionary containing 'P', 'euler', and 'Vm' arrays
     PERIOD : float
         Sampling period
@@ -523,23 +643,10 @@ def get_strides(stride_start, stride_end, walk_info, PERIOD, FILTER, OUTLIER_SEC
 
     if len(stride_start) == 0 or len(stride_end) == 0:
         # Return empty result structure
-        return {
-            'frwd_swing': np.array([]).reshape(0, 0),
-            'ltrl_swing': np.array([]).reshape(0, 0),
-            'frwd': np.array([]).reshape(0, 0),
-            'ltrl': np.array([]).reshape(0, 0),
-            'abs_ltrl': np.array([]).reshape(0, 0),
-            'abs_frwd': np.array([]).reshape(0, 0),
-            'elev': np.array([]).reshape(0, 0),
-            'theta': np.array([]).reshape(0, 0),
-            'start_end': np.array([]).reshape(0, 0),
-            'foot_heading': np.array([]),
-            'diff_foot_heading': np.array([]),
-            'stride_samples': np.array([]),
-            'time': np.array([]),
-            'frwd_speed_compensated': np.array([]),
-            'frwd_speed': np.array([])
-        }
+        empty2 = np.array([]).reshape(0, 0)
+        empty1 = np.array([])
+        return Strides(frwd=empty2, ltrl=empty2, elev=empty2,
+                       start_end=empty2, time=empty1, frwd_speed=empty1)
 
     # DIRECTION_STRIDES, determine the number of strides before and after current one, used to define a straight segment
     DIRECTION_STRIDES = 3  # default 3
@@ -551,23 +658,17 @@ def get_strides(stride_start, stride_end, walk_info, PERIOD, FILTER, OUTLIER_SEC
     number_of_strides = len(stride_start)
     longest_stride = np.max(stride_end - stride_start) + 1
     
-    P = walk_info['P']
-    euler = walk_info['euler']
-    Vm = walk_info['Vm']
-    
+    P = walk_info.P
+    euler = walk_info.euler
+    Vm = walk_info.Vm
+
     # Create matrices to store results
-    ltrl_swing = np.zeros((number_of_strides, longest_stride))
-    frwd_swing = np.zeros((number_of_strides, longest_stride))
     ltrl = np.zeros((number_of_strides, longest_stride))
     frwd = np.zeros((number_of_strides, longest_stride))
     ltrl_straighten = np.zeros((number_of_strides, longest_stride))
     frwd_straighten = np.zeros((number_of_strides, longest_stride))
-    abs_ltrl = np.zeros((number_of_strides, longest_stride))
-    abs_frwd = np.zeros((number_of_strides, longest_stride))
     elev = np.zeros((number_of_strides, longest_stride))
-    theta = np.zeros((number_of_strides, longest_stride))
-    foot_heading = np.zeros(number_of_strides)
-    diff_foot_heading = np.zeros(number_of_strides)
+    foot_heading = np.zeros(number_of_strides)  # kept: feeds the PLOT_DETAILS heading plot
     start_end = np.zeros((number_of_strides, 2))
     
     # Compute individual stride direction
@@ -616,16 +717,7 @@ def get_strides(stride_start, stride_end, walk_info, PERIOD, FILTER, OUTLIER_SEC
     
     for i in range(number_of_strides):
         stride_len = stride_end[i] - stride_start[i] + 1
-        
-        # Rotate for swing
-        frwd_swing[i, :stride_len] = (P[stride_start[i]:stride_end[i]+1, 0] * np.cos(-direction[i]) - 
-                                    P[stride_start[i]:stride_end[i]+1, 1] * np.sin(-direction[i]))
-        frwd_swing[i, stride_len:] = frwd_swing[i, stride_len-1]
-        
-        ltrl_swing[i, :stride_len] = (P[stride_start[i]:stride_end[i]+1, 0] * np.sin(-direction[i]) + 
-                                    P[stride_start[i]:stride_end[i]+1, 1] * np.cos(-direction[i]))
-        ltrl_swing[i, stride_len:] = ltrl_swing[i, stride_len-1]
-        
+
         # Uses the nearby strides to determine the angle, is less sensitive to gyro drift
         if DIRECTION_STRIDES:
             # Select the strides +/- DIRECTION_STRIDES
@@ -679,16 +771,11 @@ def get_strides(stride_start, stride_end, walk_info, PERIOD, FILTER, OUTLIER_SEC
         # Store elevation information
         elev[i, :stride_len] = P[stride_start[i]:stride_end[i]+1, 2]
         elev[i, stride_len:] = elev[i, stride_len-1]
-        
-        # Store pitch angle
-        theta[i, :stride_len] = euler[stride_start[i]:stride_end[i]+1, 1]
-        theta[i, stride_len:] = theta[i, stride_len-1]
-        
+
         stride_samples[i] = stride_end[i] - stride_start[i]
-        
-        # Store heading angle
+
+        # Store heading angle (feeds the PLOT_DETAILS heading plot)
         foot_heading[i] = corrected_heading[i]
-        diff_foot_heading[i] = euler[stride_end[i], 2] - euler[stride_start[i], 2]
         start_end[i, :] = [stride_start[i], stride_end[i]]
     
     ltrl_end = ltrl[:, -1]
@@ -738,14 +825,9 @@ def get_strides(stride_start, stride_end, walk_info, PERIOD, FILTER, OUTLIER_SEC
             plt.legend(['Line-Fit Correction', 'Piecewise Correction', '', '', 'Best correction'])
     
     # Translate foot fall location to the origin
-    frwd_swing = frwd_swing - frwd_swing[:, 0:1]
-    abs_frwd = frwd.copy()
     frwd = frwd - frwd[:, 0:1]
-    ltrl_swing = ltrl_swing - ltrl_swing[:, 0:1]
-    abs_ltrl = ltrl.copy()
     ltrl = ltrl - ltrl[:, 0:1]
     elev = elev - elev[:, 0:1]
-    # theta = theta - theta[:, 0:1]  # commented in original
     
     # Check for negative values in frwd
     if np.any(frwd[:, -1] < 0):
@@ -755,31 +837,17 @@ def get_strides(stride_start, stride_end, walk_info, PERIOD, FILTER, OUTLIER_SEC
     # Compute stride speed
     stride_length = frwd[:, -1]
     time = stride_samples * PERIOD
-    stride_speed = stride_length / time
-    coeffs = np.polyfit(stride_speed, stride_length, 1)
-    pol = np.poly1d(coeffs)
-    stride_length_fit = pol(stride_speed)
-    frwd_speed_compensated = stride_length - stride_length_fit
-    frwd_speed = stride_speed
-    
-    # Compute first order statistics and assemble result structure
-    result = {
-        'frwd_swing': frwd_swing.T,
-        'ltrl_swing': ltrl_swing.T,
-        'frwd': frwd.T,
-        'ltrl': ltrl.T,
-        'abs_ltrl': abs_ltrl.T,
-        'abs_frwd': abs_frwd.T,
-        'elev': elev.T,
-        'theta': theta.T,
-        'start_end': start_end.T,
-        'foot_heading': foot_heading,
-        'diff_foot_heading': diff_foot_heading,
-        'stride_samples': stride_samples,
-        'time': time,
-        'frwd_speed_compensated': frwd_speed_compensated,
-        'frwd_speed': frwd_speed
-    }
+    frwd_speed = stride_length / time
+
+    # Assemble result (trajectories stored as (samples, n_strides))
+    result = Strides(
+        frwd=frwd.T,
+        ltrl=ltrl.T,
+        elev=elev.T,
+        start_end=start_end.T,
+        time=time,
+        frwd_speed=frwd_speed,
+    )
     
     # Eliminate user defined outliers
     out_of_bound = []
@@ -817,8 +885,8 @@ def cut_stride_section(stride, out_of_bound, number_of_strides):
     
     Parameters:
     -----------
-    stride : dict
-        Dictionary containing all stride data
+    stride : Strides
+        Strides dataclass of stride data
     out_of_bound : list
         Indices of strides to remove
     number_of_strides : int
@@ -826,31 +894,22 @@ def cut_stride_section(stride, out_of_bound, number_of_strides):
     
     Returns:
     --------
-    stride : dict
-        Updated stride dictionary with outliers removed
+    stride : Strides
+        Strides with outliers removed
     number_of_strides : int
         New number of strides after removal
     """
     if out_of_bound:
         # Delete columns for 2D arrays (note: in Python, we need to use np.delete)
-        stride['frwd_swing'] = np.delete(stride['frwd_swing'], out_of_bound, axis=1)
-        stride['ltrl_swing'] = np.delete(stride['ltrl_swing'], out_of_bound, axis=1)
-        stride['frwd'] = np.delete(stride['frwd'], out_of_bound, axis=1)
-        stride['ltrl'] = np.delete(stride['ltrl'], out_of_bound, axis=1)
-        stride['abs_ltrl'] = np.delete(stride['abs_ltrl'], out_of_bound, axis=1)
-        stride['abs_frwd'] = np.delete(stride['abs_frwd'], out_of_bound, axis=1)
-        stride['elev'] = np.delete(stride['elev'], out_of_bound, axis=1)
-        stride['theta'] = np.delete(stride['theta'], out_of_bound, axis=1)
-        stride['start_end'] = np.delete(stride['start_end'], out_of_bound, axis=1)
-        
+        stride.frwd = np.delete(stride.frwd, out_of_bound, axis=1)
+        stride.ltrl = np.delete(stride.ltrl, out_of_bound, axis=1)
+        stride.elev = np.delete(stride.elev, out_of_bound, axis=1)
+        stride.start_end = np.delete(stride.start_end, out_of_bound, axis=1)
+
         # Delete elements for 1D arrays
-        stride['foot_heading'] = np.delete(stride['foot_heading'], out_of_bound)
-        stride['diff_foot_heading'] = np.delete(stride['diff_foot_heading'], out_of_bound)
-        stride['stride_samples'] = np.delete(stride['stride_samples'], out_of_bound)
-        stride['time'] = np.delete(stride['time'], out_of_bound)
-        stride['frwd_speed_compensated'] = np.delete(stride['frwd_speed_compensated'], out_of_bound)
-        stride['frwd_speed'] = np.delete(stride['frwd_speed'], out_of_bound)
-        
+        stride.time = np.delete(stride.time, out_of_bound)
+        stride.frwd_speed = np.delete(stride.frwd_speed, out_of_bound)
+
         new_number_of_strides = number_of_strides - len(out_of_bound)
         print(f'New number of strides {new_number_of_strides} out of {number_of_strides}')
         number_of_strides = new_number_of_strides
@@ -864,15 +923,15 @@ def filter_strides(stride, number_of_strides):
     
     Parameters:
     -----------
-    stride : dict
-        Dictionary containing all stride data
+    stride : Strides
+        Strides dataclass of stride data
     number_of_strides : int
         Current number of strides
         
     Returns:
     --------
-    stride : dict
-        Filtered stride dictionary
+    stride : Strides
+        Filtered Strides
     number_of_strides : int
         New number of strides after filtering
     """
@@ -885,7 +944,7 @@ def filter_strides(stride, number_of_strides):
     # Some of the filters use a double STD based filtering process
     
     # Eliminate long strides above the maximum limit
-    frwd = stride['frwd'].T
+    frwd = stride.frwd.T
     median_pos_frwd = np.median(frwd[:, -1])
     std_pos_frwd = np.std(frwd[:, -1])
     outlier = frwd[:, -1] > MAX_STRIDE_LENGTH
@@ -895,7 +954,7 @@ def filter_strides(stride, number_of_strides):
         stride, number_of_strides = cut_stride_section(stride, outlier, number_of_strides)
     
     # Eliminate very short strides
-    frwd = stride['frwd'].T
+    frwd = stride.frwd.T
     median_pos_frwd = np.median(frwd[:, -1])
     std_pos_frwd = np.std(frwd[:, -1])
     outlier = frwd[:, -1] < MIN_STRIDE_LENGTH
@@ -905,7 +964,7 @@ def filter_strides(stride, number_of_strides):
         stride, number_of_strides = cut_stride_section(stride, outlier, number_of_strides)
     
     # Eliminate strides away from the length median value
-    frwd = stride['frwd'].T
+    frwd = stride.frwd.T
     median_pos_frwd = np.median(frwd[:, -1])
     std_pos_frwd = np.std(frwd[:, -1])
     outlier = np.abs(frwd[:, -1] - median_pos_frwd) > std_pos_frwd * MAX_VAR
@@ -915,7 +974,7 @@ def filter_strides(stride, number_of_strides):
         stride, number_of_strides = cut_stride_section(stride, outlier, number_of_strides)
     
     # Eliminate strides that have too much side deviation
-    ltrl = stride['ltrl'].T
+    ltrl = stride.ltrl.T
     std_pos_ltrl = np.std(ltrl[:, -1])
     outlier = np.abs(ltrl[:, -1]) > std_pos_ltrl * MAX_VAR
     outlier = np.where(outlier)[0]
@@ -925,7 +984,7 @@ def filter_strides(stride, number_of_strides):
     
     if FILTER_ELEVATION:
         # Eliminate strides that have too much vertical deviation
-        elev = stride['elev'].T
+        elev = stride.elev.T
         median_pos_elev = np.median(elev[:, -1])
         std_pos_elev = np.std(elev[:, -1])
         outlier = np.abs(elev[:, -1] - median_pos_elev) > std_pos_elev * MAX_VAR
@@ -1068,7 +1127,7 @@ def compute_position_two_imus(leftWb: np.ndarray, leftAb: np.ndarray,
                          A_FF: Optional[float] = None,
                          FFL: Optional[np.ndarray] = None,
                          FFR: Optional[np.ndarray] = None,
-                         plot_details: bool = False) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+                         plot_details: bool = False) -> Tuple['FootTrajectory', 'FootTrajectory']:
     """Process two synchronized foot IMUs together.
 
     Runs compute_position() on each foot independently, then re-detects
@@ -1114,8 +1173,8 @@ def compute_position_two_imus(leftWb: np.ndarray, leftAb: np.ndarray,
     right_walk_info = compute_position(rightWb, rightAb, period, USE_KF, W_FF, A_FF, FF=FFR)
 
     # Verify that both IMUs collected the same amount of information
-    left_samples = len(left_walk_info['FF'])
-    right_samples = len(right_walk_info['FF'])
+    left_samples = len(left_walk_info.FF)
+    right_samples = len(right_walk_info.FF)
     if left_samples != right_samples:
         raise ValueError(f'Files may not be synced: L = {left_samples}, R = {right_samples}, define a SECTION')
 
@@ -1129,16 +1188,16 @@ def compute_position_two_imus(leftWb: np.ndarray, leftAb: np.ndarray,
 
     # right_walk_info['FF'], right_walk_info['FF_walking'], right_walk_info['FF_max_speed'] = \
     #     foot_fall_opposite_velocity(left_walk_info['Vm'], right_walk_info['FF'], period)
-    left_walk_info['FF'],left_walk_info['stationary_periods'] = foot_fall(leftWb, leftAb, period, W_FF=30, A_FF=1, T_FF=.4, MAX_T_FF=10)
+    left_walk_info.FF, left_walk_info.stationary_periods = foot_fall(leftWb, leftAb, period, W_FF=30, A_FF=1, T_FF=.4, MAX_T_FF=10)
     # duplicate for FF_walking
-    left_walk_info['FF_walking'] = left_walk_info['FF'].copy()
-    right_walk_info['FF'], right_walk_info['stationary_periods'] = foot_fall(rightWb, rightAb, period, W_FF=30, A_FF=1, T_FF=.4, MAX_T_FF=10)
+    left_walk_info.FF_walking = left_walk_info.FF.copy()
+    right_walk_info.FF, right_walk_info.stationary_periods = foot_fall(rightWb, rightAb, period, W_FF=30, A_FF=1, T_FF=.4, MAX_T_FF=10)
     # duplicate for FF_walking
-    right_walk_info['FF_walking'] = right_walk_info['FF'].copy()
+    right_walk_info.FF_walking = right_walk_info.FF.copy()
 
     MAX_NUMBER_FOOTFALL_DIFF = 2  # Default 2
-    left_ff_count = np.sum(left_walk_info['FF_walking'])
-    right_ff_count = np.sum(right_walk_info['FF_walking'])
+    left_ff_count = np.sum(left_walk_info.FF_walking)
+    right_ff_count = np.sum(right_walk_info.FF_walking)
     if abs(left_ff_count - right_ff_count) > MAX_NUMBER_FOOTFALL_DIFF:
         print('Warning! incompatible number of footfalls between feet, this needs to be fixed.')
         print('Check MIN_WALK_SPEED in foot_fall_opposite_velocity')
@@ -1146,30 +1205,30 @@ def compute_position_two_imus(leftWb: np.ndarray, leftAb: np.ndarray,
 
     # Recompute accelerations (ZUPT) using combined FFs
     # Left foot
-    An = left_walk_info['An']
-    FF = left_walk_info['FF']
+    An = left_walk_info.An
+    FF = left_walk_info.FF
     Anz = np.zeros((SAMPLES, 3))
     last_footfall = 0
     for i in range(1, SAMPLES):
         last_footfall = zero_velocity_updates(i, FF, An, Anz, last_footfall)
 
-    left_walk_info['Anz'] = Anz
-    left_walk_info['V'] = np.cumsum(Anz, axis=0) * period
-    left_walk_info['P'] = np.cumsum(left_walk_info['V'], axis=0) * period
-    left_walk_info['Vm'] = np.sqrt(np.sum(left_walk_info['V'] ** 2, axis=1))
+    left_walk_info.Anz = Anz
+    left_walk_info.V = np.cumsum(Anz, axis=0) * period
+    left_walk_info.P = np.cumsum(left_walk_info.V, axis=0) * period
+    left_walk_info.Vm = np.sqrt(np.sum(left_walk_info.V ** 2, axis=1))
 
     # Right foot
-    An = right_walk_info['An']
-    FF = right_walk_info['FF']
+    An = right_walk_info.An
+    FF = right_walk_info.FF
     Anz = np.zeros((SAMPLES, 3))
     last_footfall = 0
     for i in range(1, SAMPLES):
         last_footfall = zero_velocity_updates(i, FF, An, Anz, last_footfall)
 
-    right_walk_info['Anz'] = Anz
-    right_walk_info['V'] = np.cumsum(Anz, axis=0) * period
-    right_walk_info['P'] = np.cumsum(right_walk_info['V'], axis=0) * period
-    right_walk_info['Vm'] = np.sqrt(np.sum(right_walk_info['V'] ** 2, axis=1))
+    right_walk_info.Anz = Anz
+    right_walk_info.V = np.cumsum(Anz, axis=0) * period
+    right_walk_info.P = np.cumsum(right_walk_info.V, axis=0) * period
+    right_walk_info.Vm = np.sqrt(np.sum(right_walk_info.V ** 2, axis=1))
 
     # Make Plots
     import matplotlib.pyplot as plt
@@ -1177,20 +1236,20 @@ def compute_position_two_imus(leftWb: np.ndarray, leftAb: np.ndarray,
     if plot_details:
         fig = plt.figure()
         ax = fig.add_subplot(111, projection='3d')
-        ax.plot(left_walk_info['P'][left_walk_info['FF'], 0],
-                left_walk_info['P'][left_walk_info['FF'], 1],
-                left_walk_info['P'][left_walk_info['FF'], 2],
+        ax.plot(left_walk_info.P[left_walk_info.FF, 0],
+                left_walk_info.P[left_walk_info.FF, 1],
+                left_walk_info.P[left_walk_info.FF, 2],
                 '.g', label='left')
-        ax.plot(right_walk_info['P'][right_walk_info['FF'], 0],
-                right_walk_info['P'][right_walk_info['FF'], 1],
-                right_walk_info['P'][right_walk_info['FF'], 2],
+        ax.plot(right_walk_info.P[right_walk_info.FF, 0],
+                right_walk_info.P[right_walk_info.FF, 1],
+                right_walk_info.P[right_walk_info.FF, 2],
                 '.r', label='right')
-        ax.plot(left_walk_info['P'][:, 0],
-                left_walk_info['P'][:, 1],
-                left_walk_info['P'][:, 2], 'b-')
-        ax.plot(right_walk_info['P'][:, 0],
-                right_walk_info['P'][:, 1],
-                right_walk_info['P'][:, 2], 'r-')
+        ax.plot(left_walk_info.P[:, 0],
+                left_walk_info.P[:, 1],
+                left_walk_info.P[:, 2], 'b-')
+        ax.plot(right_walk_info.P[:, 0],
+                right_walk_info.P[:, 1],
+                right_walk_info.P[:, 2], 'r-')
         ax.set_xlabel('X [m]')
         ax.set_ylabel('Y [m]')
         ax.set_zlabel('Z [m]')
@@ -1199,37 +1258,37 @@ def compute_position_two_imus(leftWb: np.ndarray, leftAb: np.ndarray,
         plt.axis('equal')
 
         fig, axes = plt.subplots(2, 1, figsize=(12, 8))
-        axes[0].plot(t, left_walk_info['Vm'])
-        axes[0].plot(t[left_walk_info['FF']], left_walk_info['Vm'][left_walk_info['FF']], 'g*')
-        axes[0].plot(t[left_walk_info['FF_walking']], left_walk_info['Vm'][left_walk_info['FF_walking']], 'k.')
+        axes[0].plot(t, left_walk_info.Vm)
+        axes[0].plot(t[left_walk_info.FF], left_walk_info.Vm[left_walk_info.FF], 'g*')
+        axes[0].plot(t[left_walk_info.FF_walking], left_walk_info.Vm[left_walk_info.FF_walking], 'k.')
         axes[0].grid(True)
         axes[0].set_ylabel('Left |V| [m/s]')
         axes[0].set_xlabel('time [s]')
         axes[0].legend(['|V|', 'FFs', 'Walking'])
         axes[0].set_title('Foot Fall detection using opposite shoe speed')
 
-        axes[1].plot(t, right_walk_info['Vm'])
-        axes[1].plot(t[right_walk_info['FF']], right_walk_info['Vm'][right_walk_info['FF']], 'g*')
-        axes[1].plot(t[right_walk_info['FF_walking']], right_walk_info['Vm'][right_walk_info['FF_walking']], 'k.')
+        axes[1].plot(t, right_walk_info.Vm)
+        axes[1].plot(t[right_walk_info.FF], right_walk_info.Vm[right_walk_info.FF], 'g*')
+        axes[1].plot(t[right_walk_info.FF_walking], right_walk_info.Vm[right_walk_info.FF_walking], 'k.')
         axes[1].grid(True)
         axes[1].set_ylabel('Right |V| [m/s]')
         axes[1].set_xlabel('time [s]')
 
     if plot_details:
-        left_az_mag = np.sqrt(np.sum(left_walk_info['Anz'] ** 2, axis=1))
-        right_az_mag = np.sqrt(np.sum(right_walk_info['Anz'] ** 2, axis=1))
+        left_az_mag = np.sqrt(np.sum(left_walk_info.Anz ** 2, axis=1))
+        right_az_mag = np.sqrt(np.sum(right_walk_info.Anz ** 2, axis=1))
 
         fig, axes = plt.subplots(2, 1, figsize=(12, 8))
-        axes[0].plot(t, left_walk_info['Anz'], t, left_az_mag, 'k')
-        axes[0].plot(t[left_walk_info['FF']], left_walk_info['Vm'][left_walk_info['FF']], 'g.')
-        axes[0].plot(t[left_walk_info['FF_walking']], left_walk_info['Vm'][left_walk_info['FF_walking']], 'yo')
+        axes[0].plot(t, left_walk_info.Anz, t, left_az_mag, 'k')
+        axes[0].plot(t[left_walk_info.FF], left_walk_info.Vm[left_walk_info.FF], 'g.')
+        axes[0].plot(t[left_walk_info.FF_walking], left_walk_info.Vm[left_walk_info.FF_walking], 'yo')
         axes[0].grid(True)
         axes[0].set_ylabel('left A [m/s^2]')
         axes[0].set_xlabel('time [s]')
 
-        axes[1].plot(t, right_walk_info['Anz'], t, right_az_mag, 'k')
-        axes[1].plot(t[right_walk_info['FF']], right_walk_info['Vm'][right_walk_info['FF']], 'g.')
-        axes[1].plot(t[right_walk_info['FF_walking']], right_walk_info['Vm'][right_walk_info['FF_walking']], 'yo')
+        axes[1].plot(t, right_walk_info.Anz, t, right_az_mag, 'k')
+        axes[1].plot(t[right_walk_info.FF], right_walk_info.Vm[right_walk_info.FF], 'g.')
+        axes[1].plot(t[right_walk_info.FF_walking], right_walk_info.Vm[right_walk_info.FF_walking], 'yo')
         axes[1].grid(True)
         axes[1].set_ylabel('right A [m/s^2]')
         axes[1].set_xlabel('time [s]')
@@ -1243,14 +1302,19 @@ def _empty_steps() -> Dict[str, Any]:
         'start_idx': np.array([], dtype=int),
         'end_idx': np.array([], dtype=int),
         'time': np.array([]),
+        'frwd_speed': np.array([]),
         'length': np.array([]),
         'width': np.array([]),
-        'left_xy': np.zeros((0, 2)),
-        'right_xy': np.zeros((0, 2)),
+        'left_xyz': np.zeros((0, 3)),
+        'right_xyz': np.zeros((0, 3)),
         'anchor': None,
-        'anchor_quality': np.inf,
+        'anchor_drift_seconds': np.inf,
         'n_same_foot_skips': 0,
         'n_too_slow': 0,
+        'start_snap': None,
+        'start_snap_foot': None,
+        'start_high': DEFAULT_START_FOOTSPEED_HIGH,
+        'start_low': DEFAULT_START_FOOTSPEED_LOW,
     }
 
 
@@ -1265,152 +1329,108 @@ def _moving_contacts(P: np.ndarray, ff: np.ndarray, threshold: float) -> np.ndar
     return moving
 
 
-def step_segmentation(left_info: Dict[str, Any], right_info: Dict[str, Any],
-                      period: float,
-                      initial_separation: float = 0.3,
-                      max_step_seconds: float = 2.0,
-                      min_stride_displacement: float = 0.2) -> Dict[str, Any]:
-    """Segment steps (opposite-foot footfall to footfall) from a two-IMU bout.
+def touchdown_map(stationary_periods: np.ndarray) -> np.ndarray:
+    """Map each sample to the START of the stationary run it belongs to (its
+    touchdown). Non-stationary samples map to themselves. foot_fall() picks the
+    footfall as the arg-min-gyro sample, which wanders within the stance
+    plateau; snapping to the run start gives a consistent foot-on-ground
+    instant and stabilizes step/stride timing."""
+    stat = stationary_periods
+    rs = np.arange(len(stat))
+    for i in range(1, len(stat)):
+        if stat[i] and stat[i - 1]:
+            rs[i] = rs[i - 1]
+    return rs
 
-    A step runs from a footfall of one foot to the next footfall of the
-    *other* foot — half a gait cycle. This is the cross-foot complement of
-    stride_segmentation(), which treats each foot independently. Both feet
-    must be sample-synchronized (as produced by compute_position_two_imus).
 
-    Step *time* needs only the two footfall trains and is the most reliable
-    output. Step *length* and *width* require both feet in a common spatial
-    frame, which foot-mounted IMUs cannot observe directly; they are computed
-    under two stated assumptions:
+def snug_start(left_info: 'FootTrajectory', right_info: 'FootTrajectory',
+               high: float = DEFAULT_START_FOOTSPEED_HIGH,
+               low: float = DEFAULT_START_FOOTSPEED_LOW) -> Tuple[Optional[int], Optional[str]]:
+    """Find the true walk-start sample to snug the first step onto.
 
-    - Each foot's trajectory is rotated so its travel heading (first to last
-      moving contact) points +x (valid for straight walking bouts).
-    - At the anchor — a standing moment with footfalls of both feet close
-      together in time and the feet facing the same way — the feet are side
-      by side, `initial_separation` metres apart across the line of facing
-      (the facing comes from the feet's yaw, so a stance after the subject
-      has turned still anchors correctly). The anchor is chosen as close in
-      time to the walking block as possible, because position drift
-      accumulates in un-ZUPTed gaps between standing and walking. The *mean*
-      step width inherits the separation assumption wholesale (changing the
-      argument shifts every width by the same amount); width *variability*
-      across steps is real signal. The left/right *split* of step length
-      inherits the forward part of the anchor error; the mean of a
-      consecutive L+R step pair equals the stride length and is anchor-free.
+    Bouts are often snipped loosely, so the opening is un-ZUPTed
+    standing/box-handling whose drift inflates the first step. To recover the
+    real start we take the FIRST foot whose speed |V| crosses `high` (the first
+    committed swing), then walk backwards along that foot's |V| into the valley
+    before the swing, stopping at the first local minimum (|V| starts rising
+    again as we step further back in time) OR when |V| falls to `low`.
 
-    A step is recorded for each swing landing (a contact whose foot moved
-    more than min_stride_displacement since its own previous contact), paired
-    with the opposite foot's most recent contact — which may be a standing
-    contact, so gait-initiation steps are included. Two same-foot swing
-    landings in a row (a missed contact on the other side) and pairs further
-    apart than max_step_seconds are counted in the diagnostics instead.
-    Standing footfalls never form steps themselves; they serve as trailing
-    contacts and anchor candidates.
-
-    Parameters:
-    -----------
-    left_info, right_info : dict
-        Outputs of compute_position_two_imus() (need 'FF_walking' and 'P')
-    period : float
-        Sampling period in seconds
-    initial_separation : float
-        Assumed lateral distance between the feet when standing (default 0.3 m)
-    max_step_seconds : float
-        Footfall pairs further apart than this do not form a step
-    min_stride_displacement : float
-        A contact counts as a swing landing when its foot moved at least this
-        far (m) since its own previous contact
-
-    Returns:
-    --------
-    dict
-        'leading_foot' : 'left'/'right' per step (the foot that lands)
-        'start_idx', 'end_idx' : sample indices of the trailing and leading
-            contacts
-        'time' : step duration in seconds
-        'length' : forward distance between the successive foot placements
-        'width' : lateral separation of the placements, signed left minus
-            right (negative indicates crossover)
-        'left_xy', 'right_xy' : both trajectories in the common frame
-            (forward, lateral)
-        'anchor' : (left_idx, right_idx) of the standing pair that anchors
-            the common frame, or None if none was found (frames are then
-            anchored at the first contacts, and lengths/widths are suspect)
-        'anchor_quality' : the longest un-ZUPTed interval (s) separating the
-            anchor from the walking block — position drift grows with it, so
-            treat the length split and the mean width as unreliable when this
-            exceeds a normal stride time (say > 2 s)
-        'n_same_foot_skips', 'n_too_slow' : counts of swing contacts that did
-            not form steps
+    Returns (sample_idx, 'left'|'right'), or (None, None) if neither foot ever
+    reaches `high` (no clear swing — nothing to snug).
     """
-    left_ff = np.where(left_info['FF_walking'])[0]
-    right_ff = np.where(right_info['FF_walking'])[0]
+    Vmap = {'left': left_info.Vm, 'right': right_info.Vm}
+    first = None
+    for foot, Vm in Vmap.items():
+        hi = np.where(Vm >= high)[0]
+        if hi.size and (first is None or hi[0] < first[0]):
+            first = (int(hi[0]), foot)
+    if first is None:
+        return None, None
+    h, foot = first
+    Vm = Vmap[foot]
+    i = h
+    while i > 0:
+        if Vm[i] <= low:            # reached the low threshold
+            break
+        if Vm[i - 1] > Vm[i]:       # local min: going further back rises again
+            break
+        i -= 1
+    return i, foot
+
+
+def _common_frame(left_info: 'FootTrajectory', right_info: 'FootTrajectory', period: float,
+                  initial_separation: float = 0.3,
+                  min_stride_displacement: float = 0.2,
+                  anchor_mode: str = 'auto'):
+    """Place both feet's trajectories in ONE frame: walking axis +Y, lateral X
+    (+X = the walker's right), gravity Z. Returns (left_xyz, right_xyz, anchor,
+    anchor_drift_seconds), each xyz an (N, 3) array with columns
+    [X lateral (right +), Y forward, Z up].
+
+    Foot-mounted IMUs cannot observe the lateral offset between the feet, so it
+    is supplied by assuming the feet are `initial_separation` apart, side by
+    side, at an anchor stance — a standing footfall of each foot facing the same
+    way, chosen as close to the walking block as possible (drift accumulates in
+    un-ZUPTed gaps). The *mean* step width inherits this separation wholesale
+    (changing it shifts every width equally); width *variability* and the L/R
+    *split* of length carry the anchor error, while a consecutive L+R length
+    mean equals the stride length and is anchor-free. Treat the split / mean
+    width as unreliable when anchor_drift_seconds exceeds a normal stride time.
+    """
+    if anchor_mode not in ('auto', 'firstonly'):
+        raise ValueError(f"anchor_mode must be 'auto' or 'firstonly', got {anchor_mode!r}")
+    NL, NR = len(left_info.P), len(right_info.P)
+    left_ff = np.where(left_info.FF_walking)[0]
+    right_ff = np.where(right_info.FF_walking)[0]
     if len(left_ff) == 0 or len(right_ff) == 0:
-        return _empty_steps()
+        return np.zeros((NL, 3)), np.zeros((NR, 3)), None, np.inf
 
-    P_left, P_right = left_info['P'], right_info['P']
-    left_moving = _moving_contacts(P_left, left_ff, min_stride_displacement)
-    right_moving = _moving_contacts(P_right, right_ff, min_stride_displacement)
+    left_moving = _moving_contacts(left_info.P, left_ff, min_stride_displacement)
+    right_moving = _moving_contacts(right_info.P, right_ff, min_stride_displacement)
 
-    # Interleave the two footfall trains on the shared timeline
-    events = np.concatenate([left_ff, right_ff])
-    is_left = np.concatenate([np.ones(len(left_ff), bool), np.zeros(len(right_ff), bool)])
-    moving = np.concatenate([left_moving, right_moving])
-    order = np.argsort(events, kind='stable')
-    events, is_left, moving = events[order], is_left[order], moving[order]
-
-    steps = _empty_steps()
-
-    # Pair each swing landing with the opposite foot's most recent contact
-    max_step_samples = int(max_step_seconds / period)
-    pairs = []  # (trail event position, lead event position)
-    last_contact = {True: None, False: None}   # per foot, by is_left
-    last_swing_is_left = None
-    for k in range(len(events)):
-        if moving[k]:
-            trail = last_contact[not is_left[k]]
-            if last_swing_is_left == is_left[k]:
-                steps['n_same_foot_skips'] += 1
-            elif trail is not None and events[k] - events[trail] > max_step_samples:
-                steps['n_too_slow'] += 1
-            elif trail is not None:
-                pairs.append((trail, k))
-            last_swing_is_left = is_left[k]
-        last_contact[is_left[k]] = k
-    if not pairs:
-        return steps
-
-    # Rotate each foot's trajectory by its travel heading (first to last
-    # swing contact) so forward is +x for both, and derive the foot's facing
-    # in that frame. The sensor is mounted at an arbitrary angle about
-    # vertical, so its yaw is calibrated against the swing contacts, where
-    # the foot faces the direction of travel (facing 0 in the common frame).
+    # Rotate each foot's trajectory by its travel heading (first to last swing
+    # contact) so forward is +x' internally, and derive the foot's facing. The
+    # sensor is mounted at an arbitrary yaw, so its yaw is calibrated against the
+    # swing contacts, where the foot faces the direction of travel.
     def to_common(info, ff, moving_mask):
-        P = info['P']
+        P = info.P
         swing = ff[moving_mask]
         a, b = (swing[0], swing[-1]) if len(swing) >= 2 else (0, len(P) - 1)
         heading = np.arctan2(P[b, 1] - P[a, 1], P[b, 0] - P[a, 0])
-        XY = np.column_stack(rotate_angle(P[:, 0], P[:, 1], -heading))
-        yaw = np.exp(1j * info['euler'][:, 2])
+        fwd, lat = rotate_angle(P[:, 0], P[:, 1], -heading)   # forward->+x', lateral->y'
+        yaw = np.exp(1j * info.euler[:, 2])
         mounting = np.angle(np.mean(yaw[swing])) if len(swing) else heading
         facing = np.angle(yaw * np.exp(-1j * mounting))
-        return XY, facing
+        return fwd, lat, facing
 
-    left_xy, left_yaw = to_common(left_info, left_ff, left_moving)
-    right_xy, right_yaw = to_common(right_info, right_ff, right_moving)
+    lf, ll, l_face = to_common(left_info, left_ff, left_moving)
+    rf, rl, r_face = to_common(right_info, right_ff, right_moving)
 
-    # Anchor the common frame at a standing pair: a standing footfall of each
-    # foot with the feet facing the same way (both settled — the subject may
-    # be turned away from the travel direction, the separation vector is
-    # oriented by the feet's facing). Position error accumulates with the
-    # duration of un-ZUPTed intervals between contacts, so score each
-    # candidate by the longest inter-contact interval on the chain linking it
-    # to the walking block (plus the pair's own time separation) and take the
-    # best.
     MAX_ANCHOR_FOOT_YAW_DIFF = 0.5  # rad between the two feet at the anchor
 
     def drift_to_walk(ff, moving_mask):
-        """Longest un-ZUPTed interval (s) between each contact and the
-        walking block of its foot."""
+        """Longest un-ZUPTed interval (s) between each contact and the walking
+        block of its foot."""
         out = np.full(len(ff), np.inf)
         swing_pos = np.where(moving_mask)[0]
         if len(swing_pos) == 0:
@@ -1429,43 +1449,207 @@ def step_segmentation(left_info: Dict[str, Any], right_info: Dict[str, Any],
     right_drift = drift_to_walk(right_ff, right_moving)
     anchor = None
     best = np.inf
-    for il, dl in zip(left_ff[~left_moving], left_drift[~left_moving]):
-        for ir, dr in zip(right_ff[~right_moving], right_drift[~right_moving]):
-            if np.abs(np.angle(np.exp(1j * (left_yaw[il] - right_yaw[ir])))) > \
-                    MAX_ANCHOR_FOOT_YAW_DIFF:
-                continue
-            score = max(dl, dr) + abs(il - ir) * period
-            if score < best:
-                best, anchor = score, (int(il), int(ir))
-    steps['anchor'] = anchor
-    steps['anchor_quality'] = float(best)
-    anchor_left, anchor_right = anchor if anchor else (left_ff[0], right_ff[0])
+    if anchor_mode == 'firstonly':
+        anchor = (int(left_ff[0]), int(right_ff[0]))
+        best = max(left_drift[0], right_drift[0]) + \
+            abs(int(left_ff[0]) - int(right_ff[0])) * period
+    else:
+        for il, dl in zip(left_ff[~left_moving], left_drift[~left_moving]):
+            for ir, dr in zip(right_ff[~right_moving], right_drift[~right_moving]):
+                if np.abs(np.angle(np.exp(1j * (l_face[il] - r_face[ir])))) > \
+                        MAX_ANCHOR_FOOT_YAW_DIFF:
+                    continue
+                score = max(dl, dr) + abs(il - ir) * period
+                if score < best:
+                    best, anchor = score, (int(il), int(ir))
+    aL, aR = anchor if anchor else (int(left_ff[0]), int(right_ff[0]))
 
-    # At the anchor the feet are side by side across the line of facing:
-    # left foot a half-separation to the facing's left, right foot to its
-    # right. (When the anchor stance faces the travel direction this reduces
-    # to equal forward position and a +/- lateral offset.)
-    facing = np.angle(np.exp(1j * left_yaw[anchor_left]) +
-                      np.exp(1j * right_yaw[anchor_right]))
+    # At the anchor the feet are side by side across the line of facing: left a
+    # half-separation to the facing's left, right to its right. leftward is in
+    # (forward, lateral) components.
+    facing = np.angle(np.exp(1j * l_face[aL]) + np.exp(1j * r_face[aR]))
     leftward = np.array([-np.sin(facing), np.cos(facing)])
-    left_xy = left_xy - left_xy[anchor_left] + leftward * initial_separation / 2
-    right_xy = right_xy - right_xy[anchor_right] - leftward * initial_separation / 2
+    left_F = lf - lf[aL] + leftward[0] * initial_separation / 2
+    left_L = ll - ll[aL] + leftward[1] * initial_separation / 2
+    right_F = rf - rf[aR] - leftward[0] * initial_separation / 2
+    right_L = rl - rl[aR] - leftward[1] * initial_separation / 2
 
-    records = []
-    for k0, k1 in pairs:
-        i0, i1 = events[k0], events[k1]
-        lead_is_left = is_left[k1]
-        lead_xy, trail_xy = (left_xy, right_xy) if lead_is_left else (right_xy, left_xy)
-        iL, iR = (i1, i0) if lead_is_left else (i0, i1)
-        records.append(('left' if lead_is_left else 'right', i0, i1,
-                        (i1 - i0) * period,
-                        lead_xy[i1, 0] - trail_xy[i0, 0],
-                        left_xy[iL, 1] - right_xy[iR, 1]))
+    # output frame: X = lateral (+X = the walker's RIGHT), Y = forward (walking
+    # axis), Z = up (gravity). left_L/right_L are left-of-travel (right-handed
+    # rotation), so negate to make +X point right — then a top-down plot with
+    # forward up shows the left foot on the left.
+    left_xyz = np.column_stack([-left_L, left_F, left_info.P[:, 2]])
+    right_xyz = np.column_stack([-right_L, right_F, right_info.P[:, 2]])
+    return left_xyz, right_xyz, anchor, float(best)
 
-    foot, start_idx, end_idx, time, length, width = zip(*records)
-    steps.update(leading_foot=np.array(foot),
-                 start_idx=np.array(start_idx), end_idx=np.array(end_idx),
-                 time=np.array(time), length=np.array(length),
-                 width=np.array(width),
-                 left_xy=left_xy, right_xy=right_xy)
-    return steps
+
+def steps_from_strides(left_strides: 'Strides', right_strides: 'Strides',
+                       left_info: 'FootTrajectory', right_info: 'FootTrajectory', period: float,
+                       initial_separation: float = 0.3,
+                       min_stride_displacement: float = 0.2,
+                       anchor_mode: str = 'auto',
+                       start_high: float = DEFAULT_START_FOOTSPEED_HIGH,
+                       start_low: float = DEFAULT_START_FOOTSPEED_LOW) -> Dict[str, Any]:
+    """Segment steps from the merged foot-CONTACT train of the two feet, taking
+    speed from the validated per-foot strides and placing both feet in one frame.
+
+    A *step* is a crossing: a touchdown of one foot followed by the next
+    touchdown of the OTHER foot (half a gait cycle). The real per-foot events
+    are the walking touchdowns (FF_walking), each snapped to the start of its
+    stationary plateau (touchdown_map) so timing is not jittered by the
+    arg-min-gyro footfall placement inside the plateau.
+
+    Steps are built from the touchdowns, NOT from the stride list, because
+    stride_segmentation drops any stride spanning > 2 s — e.g. a foot that
+    stands through gait initiation while the other foot steps out first. That
+    dropped stride still corresponds to a genuine contact that should cross into
+    a step; deriving steps from contacts keeps it.
+
+    Per step:
+      * frwd_speed — the leading foot's just-completed stride speed when a stride
+        ended at that touchdown; when the inbound stride was dropped (gait
+        initiation) the speed is recovered from the mechanized trajectory P (net
+        horizontal displacement of the leading foot from its previous contact,
+        over the elapsed time). Every step has a finite speed; there are no nans.
+      * length, width — from the common frame (walking axis +Y, lateral X with
+        +X = the walker's right, gravity Z; see _common_frame): length is the
+        forward gap between the two successive placements, width the lateral gap
+        (signed; positive = normal stance, negative = crossover). These carry the
+        anchor assumption (see _common_frame and anchor_drift_seconds).
+
+    Gait initiation: both feet share the opening pre-walk stance, so each foot's
+    first touchdown is the same contact. The opening of whichever foot swings
+    first is dropped so the contact train stays alternating. The FIRST step is
+    then "snugged" (snug_start): its start/time/speed AND length/width are moved
+    to the velocity valley before the first committed swing, removing the bogus
+    long, fast first step that pre-walk drift produces. Since drift before the
+    snug is ignored, that step's length is the leading foot's forward travel from
+    the snug start (its position there subtracted) and its width is the assumed
+    initial side-by-side separation. start_snap/start_snap_foot report the sample.
+
+    Two same-foot touchdowns in a row mean the other foot missed a contact — a
+    rare fault, counted in n_same_foot_skips rather than faked.
+
+    Parameters
+    ----------
+    left_strides, right_strides : Strides
+        Per-foot stride_segmentation() outputs (uses start_end, frwd_speed).
+    left_info, right_info : FootTrajectory
+        compute_position_two_imus() outputs (need FF_walking, stationary_periods,
+        P, Vm, euler).
+    period : float
+        Sampling period (s).
+    initial_separation, min_stride_displacement, anchor_mode :
+        Passed to _common_frame for the spatial (length/width) computation.
+    start_high, start_low : float
+        Foot-speed thresholds (m/s) for snug_start.
+
+    Returns
+    -------
+    dict with keys: leading_foot, start_idx, end_idx, time, frwd_speed, length,
+        width, left_xyz, right_xyz, anchor, anchor_drift_seconds,
+        n_same_foot_skips, n_too_slow, start_snap, start_snap_foot, start_high,
+        start_low. (n_too_slow is always 0 here — kept for compatibility; this
+        segmenter does not gate steps on a max duration.)
+    """
+    def foot_events(strides, info):
+        """(touchdowns, speed_at, prev_td) for one foot. touchdowns: sorted-unique
+        snapped FF_walking indices. speed_at: {snapped stride-end index -> forward
+        speed} for completed strides (first wins). prev_td: {touchdown -> previous
+        touchdown}, used to recover a step speed from P when a stride was dropped."""
+        td = touchdown_map(info.stationary_periods)
+        ff = np.where(info.FF_walking)[0]
+        touchdowns = np.unique(td[ff]).astype(int) if ff.size else np.array([], int)
+        speed_at = {}
+        se = strides.start_end
+        if se.size:
+            spd = np.asarray(strides.frwd_speed, float)
+            for e, s in zip(se[1], spd):
+                speed_at.setdefault(int(td[int(e)]), float(s))
+        prev_td = {int(c): int(p) for p, c in zip(touchdowns[:-1], touchdowns[1:])}
+        return touchdowns, speed_at, prev_td
+
+    L_td, L_spd, L_prev = foot_events(left_strides, left_info)
+    R_td, R_spd, R_prev = foot_events(right_strides, right_info)
+    if len(L_td) == 0 or len(R_td) == 0:
+        return _empty_steps()
+    spd_map = {'left': L_spd, 'right': R_spd}
+    prev_map = {'left': L_prev, 'right': R_prev}
+    P_map = {'left': left_info.P, 'right': right_info.P}
+
+    # both feet in one frame for the spatial measures (walking +Y, lateral X, Z up)
+    left_xyz, right_xyz, anchor, anchor_drift = _common_frame(
+        left_info, right_info, period, initial_separation,
+        min_stride_displacement, anchor_mode)
+    fwd = {'left': left_xyz[:, 1], 'right': right_xyz[:, 1]}
+    lat = {'left': left_xyz[:, 0], 'right': right_xyz[:, 0]}
+
+    contacts = [(int(i), 'left') for i in L_td] + [(int(i), 'right') for i in R_td]
+    contacts.sort(key=lambda c: c[0])
+
+    # Drop the first-swinging foot's opening stance contact (see docstring).
+    l_next = L_td[1] if len(L_td) > 1 else np.inf
+    r_next = R_td[1] if len(R_td) > 1 else np.inf
+    first_swing = 'left' if l_next <= r_next else 'right'
+    contacts.remove((int(L_td[0] if first_swing == 'left' else R_td[0]), first_swing))
+
+    out = {'leading_foot': [], 'end_idx': [], 'start_idx': [], 'time': [],
+           'frwd_speed': [], 'length': [], 'width': []}
+    n_same_foot_skips = 0
+    for (i0, f0), (i1, f1) in zip(contacts, contacts[1:]):
+        if f0 == f1 or i0 == i1:        # same foot in a row = a missed contact
+            if f0 == f1:
+                n_same_foot_skips += 1
+            continue
+        spd = spd_map[f1].get(i1, np.nan)
+        if not np.isfinite(spd):
+            # Inbound stride dropped by the >2 s cap (gait initiation): recover
+            # forward speed from the mechanized trajectory.
+            prev = prev_map[f1].get(i1, i0)
+            P = P_map[f1]
+            dist = float(np.linalg.norm(P[i1, :2] - P[prev, :2]))
+            spd = dist / max((i1 - prev) * period, period)
+        iL, iR = (i1, i0) if f1 == 'left' else (i0, i1)
+        out['leading_foot'].append(f1)
+        out['start_idx'].append(i0)
+        out['end_idx'].append(i1)
+        out['time'].append((i1 - i0) * period)
+        out['frwd_speed'].append(spd)
+        out['length'].append(fwd[f1][i1] - fwd[f0][i0])
+        # +X is the walker's right, so right-minus-left keeps normal stance
+        # positive and crossover negative (value identical to the old left-minus-
+        # right on the pre-flip lateral).
+        out['width'].append(lat['right'][iR] - lat['left'][iL])
+
+    result: Dict[str, Any] = {k: np.array(v) for k, v in out.items()}
+    result['left_xyz'] = left_xyz
+    result['right_xyz'] = right_xyz
+    result['anchor'] = anchor
+    result['anchor_drift_seconds'] = anchor_drift
+    result['n_same_foot_skips'] = n_same_foot_skips
+    result['n_too_slow'] = 0
+    result['start_high'] = start_high
+    result['start_low'] = start_low
+
+    # Snug the FIRST step to the true walk start: back the first high-footspeed
+    # swing into the velocity valley before it, then recompute that step's
+    # start/time/speed/length/width from the leading foot integrated over the
+    # snugged window only. Drift before the snug start is ignored, so length is
+    # the leading foot's forward travel since g (subtracting its position at g)
+    # and width is taken as the assumed initial side-by-side separation.
+    g, gfoot = snug_start(left_info, right_info, start_high, start_low)
+    result['start_snap'] = g
+    result['start_snap_foot'] = gfoot
+    if g is not None and len(result['time']):
+        lead = result['leading_foot'][0]
+        end0 = int(result['end_idx'][0])
+        if g < end0:
+            P = P_map[lead]
+            new_t = max((end0 - g) * period, period)
+            result['start_idx'][0] = g
+            result['time'][0] = new_t
+            result['frwd_speed'][0] = float(
+                np.linalg.norm(P[end0, :2] - P[g, :2])) / new_t
+            result['length'][0] = float(fwd[lead][end0] - fwd[lead][g])
+            result['width'][0] = float(initial_separation)
+    return result

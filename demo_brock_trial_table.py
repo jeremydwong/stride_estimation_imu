@@ -15,98 +15,21 @@ Outputs:
   - `walks` dict (in __main__): walks[subject] = list of per-bout dicts with
     walk_info and stride segmentation for both feet
 """
-import sys
 import os
-import io
-import contextlib
 import numpy as np
 import pandas as pd
-import scipy.io as sio
 import matplotlib.pyplot as plt
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
-import stride_imu as imu
-from demo_brock_two_subjects import H5_FILE, ROLES
+from brock_functions import load_feet, load_trial_bounds, walker_for, process_bout
 
+H5_FILE = '/Users/jeremy/Dropbox/Treadmill Brock 2025/imu data/imuData_s01_s02_20260507.h5'
 MAT_FILE = os.environ.get(
     'STRIDE_TRIALBOUNDS_FILE',
     '/Users/jeremy/Dropbox/Treadmill Brock 2025/imu data/s01_s02_ExpTrialBounds.mat')
-
-PAD_SECONDS = 1.0   # quiet padding around each scored bout for orientation init
-
-
-def load_feet(file_path):
-    """Load the four foot IMUs, keyed ('s1'|'s2', 'left'|'right')."""
-    label_to_id = {label: sid for sid, label in imu.list_sensors(file_path).items()}
-    feet = {}
-    for subject in ['s1', 's2']:
-        for side in ['left', 'right']:
-            label = ROLES[f'{subject}_{side}_foot']
-            feet[(subject, side)] = imu.load_imu_recording(
-                file_path, sensor_id=label_to_id[label])
-    return feet
-
-
-def load_trial_bounds(mat_file):
-    """Return (start_idx, end_idx) as (96, 2) 0-based sample indices at 100 Hz."""
-    m = sio.loadmat(mat_file)
-    start_idx = m['TrialStartPoint'].astype(int) - 1   # MATLAB 1-based
-    end_idx = m['TrialEndPoint'].astype(int) - 1
-    return start_idx, end_idx
-
-
-def walker_for(trial, bout):
-    """Scheduled walker ('s1'|'s2') for 0-based trial and bout indices.
-
-    Trials 0-47: A (s1) holds box and walks second -> bout 0 = s2, bout 1 = s1.
-    Trials 48-95: the reverse.
-    """
-    if trial < 48:
-        return 's2' if bout == 0 else 's1'
-    return 's1' if bout == 0 else 's2'
 
 
 def gyro_energy(rec, i0, i1):
     """Mean angular-velocity norm (rad/s) over a sample range."""
     return float(np.mean(np.linalg.norm(rec.Wb[i0:i1], axis=1)) / rec.period)
-
-
-def process_bout(feet, subject, i0, i1, period):
-    """Slice both of the subject's feet (with padding), run the stride pipeline.
-
-    Returns a dict with walk_info and strides for both feet plus summary
-    metrics. Distances are net horizontal displacement of each foot trajectory
-    over the scored bout (the padding is excluded by construction: the foot is
-    stationary and ZUPT-pinned during the pads).
-    """
-    pad = int(PAD_SECONDS / period)
-    n = len(feet[(subject, 'left')])
-    j0, j1 = max(0, i0 - pad), min(n, i1 + pad)
-
-    left = feet[(subject, 'left')][j0:j1]
-    right = feet[(subject, 'right')][j0:j1]
-
-    # stride_segmentation prints per-call; keep the console usable over 192 bouts
-    with contextlib.redirect_stdout(io.StringIO()):
-        left_info, right_info = imu.compute_position_two_imus(
-            left.Wb, left.Ab, right.Wb, right.Ab, period)
-        left_strides = imu.stride_segmentation(left_info, period)
-        right_strides = imu.stride_segmentation(right_info, period)
-
-    def net_displacement(P):
-        return float(np.linalg.norm(P[-1, :2] - P[0, :2]))
-
-    speeds = np.r_[left_strides['frwd_speed'], right_strides['frwd_speed']]
-    return {
-        'left_info': left_info, 'right_info': right_info,
-        'left_strides': left_strides, 'right_strides': right_strides,
-        'slice': (j0, j1),
-        'n_strides_left': len(left_strides['frwd_speed']),
-        'n_strides_right': len(right_strides['frwd_speed']),
-        'dist_left_m': net_displacement(left_info['P']),
-        'dist_right_m': net_displacement(right_info['P']),
-        'stride_speed_mps': float(np.mean(speeds)) if len(speeds) else np.nan,
-        'stride_speed_std': float(np.std(speeds)) if len(speeds) else np.nan,
-    }
 
 
 def align_to_forward(P):
@@ -190,7 +113,7 @@ if __name__ == '__main__':
         for w in walks[subject]:
             cond = ('A_holds_box_walks_second' if w['trial'] <= 48
                     else 'B_holds_box_walks_second')
-            XY = align_to_forward(w['left_info']['P'])
+            XY = align_to_forward(w['left_info'].P)
             ax.plot(XY[:, 0], XY[:, 1], lw=0.5, alpha=0.4, color=cond_color[cond])
         ax.set_title(f'{subject} — left-foot bout trajectories (aligned to +Y)')
         ax.set_xlabel('lateral [m]')

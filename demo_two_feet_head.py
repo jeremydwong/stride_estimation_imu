@@ -165,8 +165,8 @@ def plot_rotation_corrected_trajectories(left_walk_info: dict, right_walk_info: 
     dx_offset : float
         X offset between left and right trajectories (default 0.3m)
     """
-    P_left = left_walk_info['P']
-    P_right = right_walk_info['P']
+    P_left = left_walk_info.P
+    P_right = right_walk_info.P
 
     # Compute rotation matrices for each foot
     R_left = compute_alignment_rotation(P_left)
@@ -226,8 +226,8 @@ def compute_stride_metrics(strides: dict) -> dict:
 
     Handles empty strides (no strides detected) by returning zeros/empty arrays.
     """
-    stride_speeds = strides['frwd_speed']
-    stride_durations = strides['time']
+    stride_speeds = strides.frwd_speed
+    stride_durations = strides.time
 
     # Handle empty strides (no strides detected)
     if len(stride_speeds) == 0:
@@ -244,7 +244,7 @@ def compute_stride_metrics(strides: dict) -> dict:
             'n_strides': 0
         }
 
-    stride_lengths = strides['frwd'][-1, :]
+    stride_lengths = strides.frwd[-1, :]
 
     return {
         'stride_lengths': stride_lengths,
@@ -283,7 +283,7 @@ def plot_full_trajectory_with_bouts(walk_info: dict, period: float,
     """
     Plot full compute_pos trajectory with bout sections highlighted in red.
     """
-    P = walk_info['P']
+    P = walk_info.P
     t = np.arange(len(P)) * period
 
     # Create figure with trajectory and time series
@@ -545,8 +545,8 @@ def process_walking_bout(bout: WalkingBout,
     head_metrics = analyze_head_motion(head_bout, period)
 
     # Compute total distance travelled for each foot
-    left_total_distance = compute_total_distance(left_walk_info['P'])
-    right_total_distance = compute_total_distance(right_walk_info['P'])
+    left_total_distance = compute_total_distance(left_walk_info.P)
+    right_total_distance = compute_total_distance(right_walk_info.P)
 
     return {
         'left_metrics': left_metrics,
@@ -787,7 +787,7 @@ if __name__ == '__main__':
     print("=" * 60)
 
     left_full_walk_info = imu.compute_position(left_synced.Wb, left_synced.Ab, PERIOD)
-    print(f"  Full trajectory computed: {len(left_full_walk_info['P'])} samples")
+    print(f"  Full trajectory computed: {len(left_full_walk_info.P)} samples")
 
     # ==========================================================================
     # Step 3/N: Detect all walking bouts using quiet period detection
