@@ -303,7 +303,8 @@ def draw_bout_block(axes4, data, ymax=(ACCEL_YMAX, FOOTSPEED_YMAX, STEPSPEED_YMA
 # One fixed hue per role. Start/Stop are ALSO separated by tick direction (up /
 # down) so the pair never relies on colour alone, and 'missed' keeps the red X.
 EVENT_COLORS = {'Start': '#1a7f37', 'Stop': '#8250df', 'flag': '#d1242f'}
-TIMELINE_COLORS = {'expected': '#8c959f', 'measured': '#1f6feb', 'missed': '#d1242f'}
+TIMELINE_COLORS = {'expected': '#8c959f', 'measured': '#1f6feb', 'missed': '#d1242f',
+                   'inferred': '#bf8700'}
 
 
 def assign_bout_times(aligned):
@@ -353,6 +354,8 @@ def draw_event_timeline(aligned, events, report=None, rows=6, figsize=(14, 13),
     """
     time_s, missed = assign_bout_times(aligned)
     t_min = time_s / 60.0
+    inferred = (aligned['inferred'].to_numpy(bool) if 'inferred' in aligned
+                else np.zeros(len(aligned), bool))
     exp = aligned['distance_m'].to_numpy(float)
     meas = aligned['measured_m'].to_numpy(float)
     counts = pair_status(aligned)
@@ -417,10 +420,15 @@ def draw_event_timeline(aligned, events, report=None, rows=6, figsize=(14, 13),
         win = (t_min >= x0 - 1) & (t_min <= x1 + 1)
         ax.plot(t_min[win], exp[win], '_', color=TIMELINE_COLORS['expected'],
                 ms=9, mew=1.6, label='expected' if r == 0 else None, zorder=4)
-        mm = win & ~missed
+        mm = win & ~missed & ~inferred
         ax.plot(t_min[mm], meas[mm], 'o', color=TIMELINE_COLORS['measured'],
                 ms=4.5, mec='white', mew=0.6,
                 label='measured' if r == 0 else None, zorder=5)
+        # bouts whose Stop was inferred from the feet settling, not clicked
+        mi = win & ~missed & inferred
+        ax.plot(t_min[mi], meas[mi], 'D', mfc='none',
+                color=TIMELINE_COLORS['inferred'], ms=5.5, mew=1.4,
+                label='measured (stop inferred)' if r == 0 else None, zorder=5)
         xx = win & missed
         ax.plot(t_min[xx], exp[xx], 'x', color=TIMELINE_COLORS['missed'],
                 ms=9, mew=2.2, label='missed (interp. time)' if r == 0 else None,

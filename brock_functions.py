@@ -219,8 +219,58 @@ def load_events(file_path):
             'time_us': time_us, 't0_us': t0}
 
 
+def infer_stop_from_quiet(data, start_s, limit_s, quiet_seconds=1.5,
+                          min_bout_s=2.0):
+    """When the experimenter forgot the Stop click, find when walking ended.
+
+    Runs detect_quiet_time() on every foot over (start_s, limit_s] and takes the
+    first moment at which ALL feet are simultaneously static for at least
+    `quiet_seconds` — i.e. everybody has come to a stand. The returned time is
+    the START of that quiet run: the instant walking ceased.
+
+    Returns the inferred stop time in seconds, or None if no such settle exists
+    before `limit_s` (in which case the Start is left unpaired rather than
+    guessed at).
+
+    A quiet run beginning within `min_bout_s` of the Start is ignored — that is
+    the walker still standing at the line, not the end of a bout. This also
+    guards detect_quiet_time's no-static fallback, which returns the first ~100
+    samples of the window.
+    """
+    if data is None or not np.isfinite(limit_s) or limit_s <= start_s:
+        return None
+    period = next(iter(data.values())).period
+    j0, j1 = int(start_s / period), int(limit_s / period)
+    n = j1 - j0
+    if n <= 0:
+        return None
+
+    all_quiet = np.ones(n, bool)
+    for rec in data.values():
+        mask = np.zeros(n, bool)
+        idx = imu.detect_quiet_time(rec.Wb[j0:j1], period)
+        idx = idx[(idx >= 0) & (idx < n)]
+        mask[idx] = True
+        all_quiet &= mask
+    if not all_quiet.any():
+        return None
+
+    need = max(1, int(quiet_seconds / period))
+    floor = int(min_bout_s / period)
+    # first run of >= `need` consecutive all-quiet samples starting past `floor`
+    padded = np.r_[False, all_quiet, False]
+    edges = np.flatnonzero(padded[1:] != padded[:-1])
+    for run_start, run_end in zip(edges[::2], edges[1::2]):
+        if run_end - run_start >= need and run_start >= floor:
+            return start_s + run_start * period
+    return None
+
+
 def automatically_score_movements_from_events(events, bounding_window_s=30.0,
-                                              min_bout_s=1.5):
+                                              min_bout_s=1.5, data=None,
+                                              infer_stops=False,
+                                              quiet_seconds=1.5,
+                                              infer_min_bout_s=2.0):
     """Pair Start/Stop button presses into scored movement bouts.
 
     Walks the annotation stream in time order holding at most one pending
@@ -229,38 +279,75 @@ def automatically_score_movements_from_events(events, bounding_window_s=30.0,
     double-press); a Stop with no viable Start is an orphan. Bouts shorter
     than `min_bout_s` are kept but flagged (likely accidental presses).
 
+    infer_stops: when True (and `data`, a label -> ImuRecording map, is given),
+    a Start that would otherwise be dropped — superseded by the next Start, or
+    left pending with no Stop in the window — is instead closed by
+    `infer_stop_from_quiet()`: the bout ends where every foot settles into
+    `quiet_seconds` of stance. This recovers bouts the experimenter started but
+    forgot to end. The search never runs past the next button press, so an
+    inferred bout cannot swallow the following one. Starts with no settle
+    before that limit stay unpaired.
+
     Returns (snips, report):
       snips  - (n, 2) float array of [start_s, stop_s] per accepted bout
-      report - dict of anomaly times: 'restarts' (superseded Starts),
-               'expired_starts' (no Stop within the window),
-               'orphan_stops', and 'short' (row indices into snips)
+      report - dict of anomaly times: 'restarts' (superseded Starts still
+               dropped), 'expired_starts' (no Stop within the window),
+               'orphan_stops', 'short' (row indices into snips), and
+               'inferred' (bool per snip row: was the Stop inferred?)
     """
     order = np.argsort(events['time_s'])
     t, lab = events['time_s'][order], events['label'][order]
-    snips, restarts, expired, orphans = [], [], [], []
+    snips, inferred, restarts, expired, orphans = [], [], [], [], []
     pending = None
-    for ti, li in zip(t, lab):
+
+    def close_pending(start, limit):
+        """Try to end an abandoned bout at the feet's settle; True if closed."""
+        if not (infer_stops and data is not None):
+            return False
+        stop = infer_stop_from_quiet(data, start, limit,
+                                     quiet_seconds=quiet_seconds,
+                                     min_bout_s=infer_min_bout_s)
+        if stop is None:
+            return False
+        snips.append((start, stop))
+        inferred.append(True)
+        return True
+
+    for k, (ti, li) in enumerate(zip(t, lab)):
         if li == 'Start':
-            if pending is not None:
+            if pending is not None and not close_pending(pending, ti):
                 restarts.append(pending)
             pending = ti
         elif li == 'Stop':
             if pending is None:
                 orphans.append(ti)
             elif ti - pending > bounding_window_s:
-                expired.append(pending)
+                # the Stop is too far to belong to this Start: close the bout at
+                # the feet if we can, and treat the late press as an orphan.
+                if not close_pending(pending, ti):
+                    expired.append(pending)
                 orphans.append(ti)
                 pending = None
             else:
                 snips.append((pending, ti))
+                inferred.append(False)
                 pending = None
     if pending is not None:
-        expired.append(pending)
+        limit = min(pending + bounding_window_s, float(t[-1]))
+        if not close_pending(pending, limit):
+            expired.append(pending)
+
     snips = np.array(snips) if snips else np.empty((0, 2))
+    inferred = np.array(inferred, bool)
+    # inferred bouts can be appended out of order relative to a later real pair
+    if len(snips):
+        srt = np.argsort(snips[:, 0])
+        snips, inferred = snips[srt], inferred[srt]
     durations = snips[:, 1] - snips[:, 0] if len(snips) else np.empty(0)
     report = {'restarts': np.array(restarts), 'expired_starts': np.array(expired),
               'orphan_stops': np.array(orphans),
               'short': np.where(durations < min_bout_s)[0],
+              'inferred': inferred, 'n_inferred': int(inferred.sum()),
               'n_start': int(np.sum(lab == 'Start')),
               'n_stop': int(np.sum(lab == 'Stop')), 'n_snips': len(snips)}
     return snips, report
@@ -299,7 +386,7 @@ def load_available_feet(file_path, patterns=('foot',)):
             if any(p in label for p in patterns)}
 
 
-def snip_distances(data, snips, pad_seconds=1.0):
+def snip_distances(data, snips, pad_seconds=1.0, inferred=None):
     """Per-snip walked distance from the foot IMUs.
 
     For each [start_s, stop_s] snip, runs single-foot inertial mechanization
@@ -314,10 +401,13 @@ def snip_distances(data, snips, pad_seconds=1.0):
     """
     rec0 = next(iter(data.values()))
     period = rec0.period
+    snips = np.asarray(snips)
+    if inferred is None:
+        inferred = np.zeros(len(snips), bool)
     rows = []
-    for start_s, stop_s in np.asarray(snips):
+    for (start_s, stop_s), is_inf in zip(snips, np.asarray(inferred, bool)):
         row = {'start_s': start_s, 'stop_s': stop_s,
-               'duration_s': stop_s - start_s}
+               'duration_s': stop_s - start_s, 'inferred': bool(is_inf)}
         for label, rec in data.items():
             j0 = max(0, int((start_s - pad_seconds) / period))
             j1 = min(len(rec.Wb), int((stop_s + pad_seconds) / period))
@@ -501,7 +591,7 @@ def bout_spacing(aligned):
 
 def compare_to_trials(data, snips, processed_trialtable, pad_seconds=1.0,
                       reps=2, walkers_per_rep=2, order='rep_major',
-                      gap_penalty=0.55, measured=None):
+                      gap_penalty=0.55, measured=None, inferred=None):
     """Compare event-scored snips against the condition table's distances.
 
     Measures each snip's walked distance from the foot IMUs (`snip_distances`),
@@ -522,7 +612,8 @@ def compare_to_trials(data, snips, processed_trialtable, pad_seconds=1.0,
       'extra'    - measured rows matching no expected bout
     """
     if measured is None:
-        measured = snip_distances(data, snips, pad_seconds=pad_seconds)
+        measured = snip_distances(data, snips, pad_seconds=pad_seconds,
+                                  inferred=inferred)
     expected = expected_bouts(processed_trialtable, reps=reps,
                               walkers_per_rep=walkers_per_rep, order=order)
     matches, missed_idx, extra_idx = align_snips_to_expected(
@@ -532,11 +623,14 @@ def compare_to_trials(data, snips, processed_trialtable, pad_seconds=1.0,
     for col in ('snip', 'start_s', 'stop_s', 'duration_s', 'measured_m'):
         aligned[col] = np.nan
     aligned['walker'] = ''
+    aligned['inferred'] = False
     for si, ej in matches:
         aligned.loc[ej, ['snip', 'start_s', 'stop_s', 'duration_s']] = (
             si, *measured.loc[si, ['start_s', 'stop_s', 'duration_s']])
         aligned.loc[ej, 'measured_m'] = measured.loc[si, 'distance_m']
         aligned.loc[ej, 'walker'] = measured.loc[si, 'walker']
+        if 'inferred' in measured.columns:
+            aligned.loc[ej, 'inferred'] = bool(measured.loc[si, 'inferred'])
     aligned['distance_error_m'] = aligned['measured_m'] - aligned['distance_m']
     return {'measured': measured, 'expected': expected, 'aligned': aligned,
             'missed': aligned.iloc[missed_idx],
