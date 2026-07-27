@@ -295,3 +295,161 @@ def draw_bout_block(axes4, data, ymax=(ACCEL_YMAX, FOOTSPEED_YMAX, STEPSPEED_YMA
     ax_acc.tick_params(labelbottom=False)     # shared x: only label the bottom plot
     ax_vel.tick_params(labelbottom=False)
     ax_step.set_xlabel('time from snug gait start [s]')
+
+# ---------------------------------------------------------------------------
+# Event-scored session timeline (Brock dataset 2): where were the clicks?
+# ---------------------------------------------------------------------------
+
+# One fixed hue per role. Start/Stop are ALSO separated by tick direction (up /
+# down) so the pair never relies on colour alone, and 'missed' keeps the red X.
+EVENT_COLORS = {'Start': '#1a7f37', 'Stop': '#8250df', 'flag': '#d1242f'}
+TIMELINE_COLORS = {'expected': '#8c959f', 'measured': '#1f6feb', 'missed': '#d1242f'}
+
+
+def assign_bout_times(aligned):
+    """Give every expected bout a time, so missed bouts can be placed on a
+    time axis alongside the ones that matched a snip.
+
+    Matched bouts sit at their snip midpoint. Missed bouts have no snip, so
+    their time is linearly interpolated over the expected-bout sequence index
+    from the matched neighbours either side. Returns (time_s, is_missed).
+    """
+    seq = np.arange(len(aligned), dtype=float)
+    mid = (aligned['start_s'].to_numpy(float) + aligned['stop_s'].to_numpy(float)) / 2
+    ok = np.isfinite(mid)
+    time_s = mid.copy()
+    if ok.any():
+        time_s[~ok] = np.interp(seq[~ok], seq[ok], mid[ok])
+    return time_s, ~ok
+
+
+def pair_status(aligned):
+    """Per (trial, rep) matched-bout count. Each rep should yield exactly two
+    bouts (one per walker), so a count of 0, 1 or 3+ is the 'uneven pair' flag.
+    Returns a dict {(trial, rep): n_matched}."""
+    got = aligned.assign(_m=aligned['snip'].notna())
+    return got.groupby(['trial', 'rep'])['_m'].sum().to_dict()
+
+
+def draw_event_timeline(aligned, events, report=None, rows=6, figsize=(14, 13),
+                        ymax=14.0, event_band=(-3.2, -1.2), fig=None):
+    """Measured vs expected bout distance across EXPERIMENT TIME, over the raw
+    button-press stream.
+
+    Answers "where were the clicks?" — every Start/Stop press is drawn beneath
+    the bouts, so a red X (missed bout) can be read against whether presses
+    actually happened there.
+
+    Each row is a slice of the session: bottom axis = experiment time, top axis
+    = expected bout-sequence index (the x of the sequence plot). Grey = expected
+    distance, blue = measured, red X = missed. The two bouts of one trial-rep
+    are joined by a connector, drawn red/dashed when that rep did not yield the
+    expected pair.
+
+    aligned : the compare_to_trials() 'aligned' frame
+    events  : load_events() dict ('label', 'time_s')
+    report  : automatically_score_movements_from_events() report; its restarts /
+              orphan_stops / short snips get flagged if given.
+    """
+    time_s, missed = assign_bout_times(aligned)
+    t_min = time_s / 60.0
+    exp = aligned['distance_m'].to_numpy(float)
+    meas = aligned['measured_m'].to_numpy(float)
+    counts = pair_status(aligned)
+
+    ev_t = np.asarray(events['time_s']) / 60.0
+    ev_lab = np.asarray(events['label'])
+    span_lo = aligned['start_s'].to_numpy(float) / 60.0
+    span_hi = aligned['stop_s'].to_numpy(float) / 60.0
+
+    lo, hi = float(np.nanmin(t_min)), float(np.nanmax(t_min))
+    edges = np.linspace(lo - 0.5, hi + 0.5, rows + 1)
+    if fig is None:
+        fig = plt.figure(figsize=figsize)
+    axes = fig.subplots(rows, 1)
+    axes = np.atleast_1d(axes)
+    eb0, eb1 = event_band
+    ebm = (eb0 + eb1) / 2
+
+    for r, ax in enumerate(axes):
+        x0, x1 = edges[r], edges[r + 1]
+        ax.set_xlim(x0, x1)
+        ax.set_ylim(eb0 - 0.6, ymax)
+
+        # --- event band: every button press, Start up / Stop down ---
+        ax.axhline(ebm, color='0.85', lw=0.8, zorder=0)
+        for lab, sign in (('Start', 1), ('Stop', -1)):
+            sel = (ev_lab == lab) & (ev_t >= x0) & (ev_t <= x1)
+            ax.vlines(ev_t[sel], ebm, ebm + sign * (eb1 - eb0) * 0.45,
+                      color=EVENT_COLORS[lab], lw=1.0,
+                      label=f'{lab} press' if r == 0 else None, zorder=3)
+
+        # --- accepted snip spans (start press -> stop press) ---
+        vis = np.isfinite(span_lo) & (span_hi >= x0) & (span_lo <= x1)
+        ax.hlines(np.full(vis.sum(), ebm), span_lo[vis], span_hi[vis],
+                  color='0.55', lw=2.4, alpha=0.7,
+                  label='paired snip' if r == 0 else None, zorder=2)
+
+        # --- press-stream anomalies from the pairing report ---
+        if report is not None and r == 0:
+            ax.plot([], [], marker='|', ls='none', color=EVENT_COLORS['flag'],
+                    ms=12, mew=2, label='press anomaly')
+        if report is not None:
+            odd = np.r_[np.asarray(report.get('restarts', []), float),
+                        np.asarray(report.get('orphan_stops', []), float)] / 60.0
+            odd = odd[(odd >= x0) & (odd <= x1)]
+            ax.plot(odd, np.full(len(odd), eb1 + 0.35), marker='v', ls='none',
+                    color=EVENT_COLORS['flag'], ms=5, zorder=4)
+
+        # --- trial-rep pair connectors (uneven pairs flagged) ---
+        for (trial, rep), n in counts.items():
+            sel = ((aligned['trial'] == trial) & (aligned['rep'] == rep)).to_numpy()
+            xs = t_min[sel]
+            if xs.max() < x0 or xs.min() > x1:
+                continue
+            even = (n == 2)
+            ax.plot(xs, np.full(len(xs), exp[sel][0]),
+                    color=TIMELINE_COLORS['expected'] if even else EVENT_COLORS['flag'],
+                    lw=1.0 if even else 1.6, ls='-' if even else '--',
+                    alpha=0.9, zorder=1)
+
+        # --- expected / measured / missed ---
+        win = (t_min >= x0 - 1) & (t_min <= x1 + 1)
+        ax.plot(t_min[win], exp[win], '_', color=TIMELINE_COLORS['expected'],
+                ms=9, mew=1.6, label='expected' if r == 0 else None, zorder=4)
+        mm = win & ~missed
+        ax.plot(t_min[mm], meas[mm], 'o', color=TIMELINE_COLORS['measured'],
+                ms=4.5, mec='white', mew=0.6,
+                label='measured' if r == 0 else None, zorder=5)
+        xx = win & missed
+        ax.plot(t_min[xx], exp[xx], 'x', color=TIMELINE_COLORS['missed'],
+                ms=9, mew=2.2, label='missed (interp. time)' if r == 0 else None,
+                zorder=6)
+
+        ax.set_ylabel('distance [m]')
+        ax.grid(axis='y', color='0.93', lw=0.6)
+        ax.set_axisbelow(True)
+        for s in ('top', 'right'):
+            ax.spines[s].set_visible(False)
+
+        # --- top axis: expected bout-sequence index ---
+        top = ax.twiny()
+        top.set_xlim(x0, x1)
+        tk = np.where(win & ~missed)[0]
+        tk = tk[::max(1, len(tk) // 8)]
+        top.set_xticks(t_min[tk])
+        top.set_xticklabels([f'{i}\nT{int(aligned["trial"].iloc[i])}' for i in tk],
+                            fontsize=6.5, color='0.35')
+        top.tick_params(length=2, pad=1)
+        for s in ('bottom', 'left', 'right'):
+            top.spines[s].set_visible(False)
+        top.spines['top'].set_color('0.85')
+
+    axes[-1].set_xlabel('experiment time [min]')
+    axes[0].set_title('bout distance across experiment time, over the button-press stream\n'
+                      'top axis: expected bout sequence index / trial',
+                      fontsize=10, pad=26)
+    axes[0].legend(loc='upper left', bbox_to_anchor=(0, 1.02), ncol=6,
+                   fontsize=7.5, frameon=False)
+    fig.tight_layout()
+    return fig, axes
