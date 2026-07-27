@@ -454,38 +454,75 @@ def expected_bouts(processed_trialtable, reps=2, walkers_per_rep=2,
     return pd.DataFrame(rows)
 
 
-def align_snips_to_expected(measured, expected, gap_penalty=0.55):
+def align_snips_to_expected(measured, expected, gap_penalty=0.55, times=None,
+                            same_trial=None, spacing=None, time_weight=0.6):
     """Needleman-Wunsch alignment of measured snip distances to the expected
     bout-distance sequence.
 
     Match cost = |measured - expected| / max(measured, expected) (0 = perfect);
     skipping either an expected bout (missed / not captured by button presses)
-    or a measured snip (extra press pair) costs `gap_penalty`. Returns
-    (matches, missed_idx, extra_idx): matches is a list of (snip_i, expected_j)
-    pairs; missed_idx indexes expected rows with no snip; extra_idx indexes
-    snips with no expected bout.
+    or a measured snip (extra press pair) costs `gap_penalty`.
+
+    **Time consistency.** Distance alone lets the alignment place the two bouts
+    of one trial minutes apart, orphaning the real walks in between — the two
+    walkers of a rep actually go ~13 s apart and trials ~40 s apart. When
+    `times` (snip start times, seconds) and `same_trial` (per expected row: is
+    it the same trial-rep as the previous row?) are given, a diagonal step also
+    pays for the mismatch between the observed inter-snip gap and the gap that
+    the expected pair implies, weighted by `time_weight`. Set time_weight=0 for
+    the old distance-only behaviour.
+
+    Returns (matches, missed_idx, extra_idx): matches is a list of
+    (snip_i, expected_j) pairs; missed_idx indexes expected rows with no snip;
+    extra_idx indexes snips with no expected bout.
     """
     obs = np.asarray(measured, float)
     exp = np.asarray(expected, float)
     n, m = len(obs), len(exp)
+    use_time = (times is not None and same_trial is not None and time_weight > 0)
+    if use_time:
+        times = np.asarray(times, float)
+        same_trial = np.asarray(same_trial, bool)
+        spacing = spacing or {'within_trial_s': 13.0, 'between_trial_s': 40.0}
 
-    def cost(o, e):
+    def dcost(o, e):
         if np.isnan(o):
             return gap_penalty * 0.9   # unmeasurable snip: near-neutral match
         return abs(o - e) / max(o, e, 0.5)
 
-    D = np.zeros((n + 1, m + 1))
+    def tcost(i, j):
+        """Penalty for the time step into a diagonal match at (i, j), 1-based.
+
+        Charged ONLY when expected rows j-2 and j-1 are the two bouts of the
+        same trial-rep: those walkers go one after the other (~13 s), so a match
+        implying minutes between them is the specific pathology worth
+        forbidding. Between-trial gaps are left free — the session's real
+        transitions vary widely (breaks, resets) and penalising them makes the
+        alignment drop good matches rather than fix bad ones.
+        """
+        if not use_time or i < 2 or j < 2 or not same_trial[j - 1]:
+            return 0.0
+        dt = times[i - 1] - times[i - 2]
+        want = spacing['within_trial_s']
+        if dt <= want:
+            return 0.0
+        return min((dt - want) / (want + 20.0), 6.0)
+
+    D = np.full((n + 1, m + 1), np.inf)
+    D[0, 0] = 0.0
     D[:, 0] = np.arange(n + 1) * gap_penalty
     D[0, :] = np.arange(m + 1) * gap_penalty
+    diag = np.zeros((n + 1, m + 1))
     for i in range(1, n + 1):
         for j in range(1, m + 1):
-            D[i, j] = min(D[i-1, j-1] + cost(obs[i-1], exp[j-1]),
+            diag[i, j] = dcost(obs[i-1], exp[j-1]) + time_weight * tcost(i, j)
+            D[i, j] = min(D[i-1, j-1] + diag[i, j],
                           D[i-1, j] + gap_penalty,
                           D[i, j-1] + gap_penalty)
     matches, missed, extra = [], [], []
     i, j = n, m
     while i > 0 or j > 0:
-        if i > 0 and j > 0 and np.isclose(D[i, j], D[i-1, j-1] + cost(obs[i-1], exp[j-1])):
+        if i > 0 and j > 0 and np.isclose(D[i, j], D[i-1, j-1] + diag[i, j]):
             matches.append((i - 1, j - 1)); i, j = i - 1, j - 1
         elif i > 0 and np.isclose(D[i, j], D[i-1, j] + gap_penalty):
             extra.append(i - 1); i -= 1
@@ -591,7 +628,8 @@ def bout_spacing(aligned):
 
 def compare_to_trials(data, snips, processed_trialtable, pad_seconds=1.0,
                       reps=2, walkers_per_rep=2, order='rep_major',
-                      gap_penalty=0.55, measured=None, inferred=None):
+                      gap_penalty=0.55, measured=None, inferred=None,
+                      time_weight=0.6, spacing=None):
     """Compare event-scored snips against the condition table's distances.
 
     Measures each snip's walked distance from the foot IMUs (`snip_distances`),
@@ -602,6 +640,11 @@ def compare_to_trials(data, snips, processed_trialtable, pad_seconds=1.0,
     `order` sets the expected sequence layout (see expected_bouts). Pass a
     precomputed `measured` DataFrame (from snip_distances) to skip the slow
     per-snip mechanization when re-aligning.
+
+    `time_weight` / `spacing` feed the alignment's time-consistency term (see
+    align_snips_to_expected): without it, distance-only matching will place the
+    two bouts of one trial minutes apart and orphan the real walks between
+    them. time_weight=0 restores the old behaviour.
 
     Returns a dict:
       'measured' - per-snip DataFrame (times, per-foot + best distance, walker)
@@ -614,10 +657,17 @@ def compare_to_trials(data, snips, processed_trialtable, pad_seconds=1.0,
     if measured is None:
         measured = snip_distances(data, snips, pad_seconds=pad_seconds,
                                   inferred=inferred)
+    if spacing is None:
+        spacing = {'within_trial_s': 13.0, 'between_trial_s': 40.0}
     expected = expected_bouts(processed_trialtable, reps=reps,
                               walkers_per_rep=walkers_per_rep, order=order)
+    # same_trial[j]: does expected row j continue the previous row's trial-rep?
+    key = list(zip(expected['trial'], expected['rep']))
+    same_trial = np.array([False] + [key[j] == key[j-1] for j in range(1, len(key))])
     matches, missed_idx, extra_idx = align_snips_to_expected(
-        measured['distance_m'], expected['distance_m'], gap_penalty=gap_penalty)
+        measured['distance_m'], expected['distance_m'], gap_penalty=gap_penalty,
+        times=measured['start_s'], same_trial=same_trial, spacing=spacing,
+        time_weight=time_weight)
 
     aligned = expected.copy()
     for col in ('snip', 'start_s', 'stop_s', 'duration_s', 'measured_m'):
