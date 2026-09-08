@@ -20,6 +20,27 @@ MASTER = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                       '..', 'notebooks', 'demo_brock_dataset2_auto.ipynb')
 
 
+
+# Colab bootstrap cell inserted after the title of every session notebook.
+COLAB_CELL = """\
+# --- Google Colab setup (safe to run anywhere: it is a NO-OP locally) -------
+# On Colab this clones the code, installs the interactive-plot backend, and
+# mounts your Google Drive for the session data (the .h5 is ~200 MB - too big
+# for the git repo, so put a copy of the 'imu data' folder in your Drive and
+# check DATA_DIR in the next cell points at it).
+import os, sys
+IN_COLAB = 'google.colab' in sys.modules
+if IN_COLAB:
+    if not os.path.isdir('/content/stride_estimation_imu'):
+        !git clone -q https://github.com/jeremydwong/stride_estimation_imu.git /content/stride_estimation_imu
+    %cd /content/stride_estimation_imu/notebooks
+    !pip install -q ipympl
+    from google.colab import output, drive
+    output.enable_custom_widget_manager()   # lets the interactive cells work
+    drive.mount('/content/drive')
+"""
+
+
 # ---------------------------------------------------------------------------
 # Tutorial playground appended at the end of every session notebook.
 # Kept as module-level data so patch scripts can reuse the exact same cells.
@@ -46,6 +67,36 @@ If you are comfortable with these, you can re-analyse anything:
    spans and any rescores you clicked. `print()` one to see its state.
 
 The cells below poke at each in turn — copy, edit and re-run them freely.
+
+None of this needs memorizing — human working memory holds ~7 items, and these
+objects hold far more. Cell (0) below shows the three introspection patterns
+(`list(d)` / `.items()` for dicts, `vars(obj)` for objects, `.dtypes`/`.head()`
+for tables) that let you ask *any* variable what it contains.
+"""),
+    ('code', """\\
+# --- 0) don't memorize - ask the object what it contains --------------------
+# Human working memory holds ~7 items; this notebook's objects hold far more.
+# So never try to remember what is inside something - ASK it. Three patterns
+# cover every named variable in this notebook:
+
+# (a) a DICT, like `feet`: list its keys, or loop over key -> value pairs
+print('feet is a', type(feet).__name__, 'with keys:', list(feet))
+for name, rec in feet.items():
+    print(f'   {{name}}: {{len(rec)}} samples @ {{1/rec.period:.0f}} Hz')
+
+# (b) an OBJECT, like one ImuRecording: vars(obj) is a dict of its fields.
+# Print names + types + shapes instead of the values (arrays are huge):
+rec = feet['left_foot_a']
+print('\\none ImuRecording contains:')
+for field, value in vars(rec).items():
+    desc = getattr(value, 'shape', None) or type(value).__name__
+    print(f'   rec.{{field:22s}} {{desc}}')
+# (for anything else: dir(obj) lists methods too, help(obj) prints the docs)
+
+# (c) a DataFrame, like `aligned` or `conditions`: .columns/.dtypes name the
+# columns, .head() peeks at rows, .describe() summarizes numeric columns
+print('\\naligned columns:'); print(aligned.dtypes.to_string())
+aligned.head(3)
 """),
     ('code', """\
 # --- 1) raw IMU data: pick a bout, look at the actual signals ---------------
@@ -194,10 +245,25 @@ def build(tag, date):
         'the remaining foot alone.\n')
     cells[0]['source'] = src.splitlines(keepends=True)
 
+    # --- Colab bootstrap cell right after the title ---
+    cells.insert(1, code(COLAB_CELL))
+
     # --- config cell: paths, session tag, new inference parameters ---
-    src = ''.join(cells[1]['source'])
-    src = src.replace('imuData_s03_s04_20260622.h5', f'imuData_{tag}_{date}.h5')
-    src = src.replace('trialtable_20260622.csv', f'trialtable_{date}.csv')
+    src = ''.join(cells[2]['source'])
+    src = src.replace(
+        "H5_FILE = os.environ.get('STRIDE_DATA_FILE',\n"
+        "    '/Users/jeremy/Dropbox/Treadmill Brock 2025/imu data/imuData_s03_s04_20260622.h5')",
+        "# where the session data lives: your Drive on Colab, Dropbox locally\n"
+        "DATA_DIR = ('/content/drive/MyDrive/Treadmill Brock 2025/imu data'\n"
+        "            if 'google.colab' in sys.modules else\n"
+        "            '/Users/jeremy/Dropbox/Treadmill Brock 2025/imu data')\n"
+        "H5_FILE = os.environ.get('STRIDE_DATA_FILE',\n"
+        f"    os.path.join(DATA_DIR, 'imuData_{tag}_{date}.h5'))")
+    src = src.replace(
+        "CONDITION_CSV = os.environ.get('STRIDE_TRIALTABLE_FILE',\n"
+        "    '/Users/jeremy/Dropbox/Treadmill Brock 2025/imu data/trialtable_20260622.csv')",
+        "CONDITION_CSV = os.environ.get('STRIDE_TRIALTABLE_FILE',\n"
+        f"    os.path.join(DATA_DIR, 'trialtable_{date}.csv'))")
     src = src.replace(
         'from brock_functions import (load_events, automatically_score_movements_from_events,\n'
         '                             load_condition_table, load_available_feet,\n'
@@ -209,9 +275,9 @@ def build(tag, date):
         '                             apply_manual_rescore)')
     src = src.replace(
         "CONDITION_CSV = os.environ.get('STRIDE_TRIALTABLE_FILE',\n"
-        f"    '/Users/jeremy/Dropbox/Treadmill Brock 2025/imu data/trialtable_{date}.csv')",
+        f"    os.path.join(DATA_DIR, 'trialtable_{date}.csv'))",
         "CONDITION_CSV = os.environ.get('STRIDE_TRIALTABLE_FILE',\n"
-        f"    '/Users/jeremy/Dropbox/Treadmill Brock 2025/imu data/trialtable_{date}.csv')\n"
+        f"    os.path.join(DATA_DIR, 'trialtable_{date}.csv'))\n"
         "\n"
         "# all generated tables live beside the imu data, next to figures/\n"
         "CACHE_DIR = os.path.join(os.path.dirname(H5_FILE), 'cached data')\n"
@@ -237,10 +303,10 @@ def build(tag, date):
         'QUIET_SECONDS = 0.75       # walker-pair stance that ends the bout: must be\n'
         '                           # shorter than a hand-off stance (~0.9 s observed)\n'
         '                           # and longer than within-gait double-stance (~0.3 s)\n')
-    cells[1]['source'] = src.splitlines(keepends=True)
+    cells[2]['source'] = src.splitlines(keepends=True)
 
     # --- section A markdown: describe the per-person stop inference ---
-    src = ''.join(cells[2]['source'])
+    src = ''.join(cells[3]['source'])
     src = src.replace(
         'With\n`INFER_STOPS = True`, `infer_stop_from_quiet()` closes it at the '
         'first moment **every\nfoot is simultaneously static for `QUIET_SECONDS`** '
@@ -255,35 +321,35 @@ def build(tag, date):
         'happens before the walker\'s un-clicked return walk, so\ninferred bouts ran '
         '30-40 s for 10 s walks.) The search runs only up to the next button\npress '
         'so an inferred bout can never swallow the following one.')
-    cells[2]['source'] = src.splitlines(keepends=True)
+    cells[3]['source'] = src.splitlines(keepends=True)
 
     # --- section E markdown: press counts are session-specific -> genericize ---
-    src = ''.join(cells[11]['source'])
+    src = ''.join(cells[12]['source'])
     src = src.replace(
         'blue = measured, red X = missed. Only two annotation types exist in this file\n'
         '(200 `Start`, 183 `Stop`, all from the `event` sensor) — there are no other button kinds.',
         'blue = measured, red X = missed. Only two annotation types exist in these files\n'
         '(`Start`/`Stop`, all from the `event` sensor) — there are no other button kinds.')
-    cells[11]['source'] = src.splitlines(keepends=True)
+    cells[12]['source'] = src.splitlines(keepends=True)
 
     # --- section F markdown: examples come from the method-development session ---
-    src = ''.join(cells[13]['source'])
+    src = ''.join(cells[14]['source'])
     src = src.replace(
         '## F. Why is each bout missing? (documenting the logic)\n',
         '## F. Why is each bout missing? (documenting the logic)\n\n'
         '*(The worked examples below — trials 37-40, trial 2 rep 2, etc. — are from the\n'
         's03/s04 20260622 session where this method was developed; the logic applies\n'
         'unchanged here.)*\n')
-    cells[13]['source'] = src.splitlines(keepends=True)
+    cells[14]['source'] = src.splitlines(keepends=True)
 
     # --- output csv name ---
-    src = ''.join(cells[15]['source'])
+    src = ''.join(cells[16]['source'])
     src = src.replace(
         "aligned.to_csv('brock_dataset2_auto_aligned.csv', index=False)\n"
         "print('wrote brock_dataset2_auto_aligned.csv,', len(aligned), 'rows')",
         'aligned.to_csv(ALIGNED_CSV, index=False)\n'
         "print(f'wrote {ALIGNED_CSV},', len(aligned), 'rows')")
-    cells[15]['source'] = src.splitlines(keepends=True)
+    cells[16]['source'] = src.splitlines(keepends=True)
 
     # --- G. per-trial figures ---
     cells.append(md(

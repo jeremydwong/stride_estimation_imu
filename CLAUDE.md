@@ -605,3 +605,25 @@ Everything compiles; imports verified from notebooks/ cwd; generator builds
 into notebooks/ with correct paths. Git status shows the moves as renames
 (uncommitted — commit when ready). Restart the Jupyter server from the repo
 root and open notebooks from notebooks/.
+
+### 2026-09-08
+
+- **Committed the restructure** (9bd85ee) — moves recorded as renames.
+- **demo_brock_s07_s08_auto on Colab**: new bootstrap cell after the title
+  (no-op locally): clones the repo, %cd notebooks, pip installs ipympl +
+  enables the custom widget manager (so the interactive cells work), mounts
+  Google Drive. Config cell gained a DATA_DIR switch — Drive path
+  ('/content/drive/MyDrive/Treadmill Brock 2025/imu data') on Colab, Dropbox
+  locally — with H5_FILE/CONDITION_CSV joined from it (the ~200 MB .h5 cannot
+  live in the repo; users copy the 'imu data' folder into their Drive).
+  README got the Colab badge. Generator emits all of it for future sessions
+  (its CACHE-block anchor updated for the DATA_DIR-form config; ordering of
+  the config replaces matters).
+- **Tutorial cell (0): introspection** (user: working memory is ~7 items —
+  teach students to ask objects what they contain): `list(d)`/`.items()` for
+  dicts (feet), `vars(obj)` field->shape loop for objects (ImuRecording),
+  `.dtypes`/`.head()`/`.describe()` for DataFrames (aligned, conditions),
+  plus dir()/help() pointers. Playground markdown frames it. In both session
+  notebooks + generator.
+- Notebook cell validation now replaces !/% magic lines with `pass` (plain
+  stripping broke `if IN_COLAB:` bodies).

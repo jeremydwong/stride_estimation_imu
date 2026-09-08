@@ -6,6 +6,8 @@ A Python library for estimating walking strides and gait parameters from IMU (In
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/jeremydwong/stride_estimation_imu/blob/main/notebooks/demo_colab_two_feet_head_exphand.ipynb) Two Feet + Head Demo
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/jeremydwong/stride_estimation_imu/blob/main/notebooks/demo_brock_s07_s08_auto.ipynb) Brock two-subject session (s07/s08): auto bout scoring, per-trial inspection, interactive rescoring — bring the session data via Google Drive
+
 ## Features
 
 - Load and process APDM sensor data from `.h5` files
