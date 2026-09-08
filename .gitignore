@@ -52,3 +52,6 @@ Thumbs.db
 # Generated Brock figures (they live in the Dropbox imu-data figures folder)
 figures/
 .ipynb_checkpoints/
+
+# Regenerable parameter-sweep cache (figures/metrics are retained for review).
+debug/track_foot_difference/trajectories.npz

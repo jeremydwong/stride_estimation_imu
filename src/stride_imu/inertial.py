@@ -380,6 +380,8 @@ def foot_fall(W: np.ndarray, A: np.ndarray, period: float, W_FF: Optional[float]
     return FF, stationary_periods
 
 def kalman_filter_tilt(period: float, quaternion, P, Q, R, accel_theta: Optional[float] = None, accel_phi: Optional[float] = None, is_stationary: Optional[bool] = None) -> tuple[np.ndarray, float, float, float]:
+    # Legacy Euler correction is retained for compatibility. See experimental.
+    # kalman_filter_gravity for an opt-in gravity-vector tilt correction.
     # Simple complementary filter for tilt correction
     if quaternion is None:
         return np.array([1.0, 0.0, 0.0, 0.0]), 0, 1e-5,1e-1
@@ -434,6 +436,10 @@ def compute_position(W: np.ndarray, A: np.ndarray, period: float, USE_KF: int = 
     footfalls (stance phases), and applies zero-velocity updates (ZUPT) to
     correct drift. Returns a dict containing position trajectory, velocity,
     orientation, and footfall arrays.
+
+    Compatibility note: this legacy path is unchanged. The opt-in alternative
+    ``experimental.compute_position_experimental`` adds gravity-vector tilt,
+    independent tilt gates, and explicit gyro-bias calibration for turn studies.
 
     Parameters:
     -----------

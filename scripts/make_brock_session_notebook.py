@@ -21,32 +21,54 @@ MASTER = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 
 
+RESULTS_CELL = """# --- Colab only: download everything this notebook produced -----------------
+# Zips the cached tables + this session's figures (they live in the Colab VM,
+# which is wiped when the session ends) and hands the zip to your browser.
+# No Google permissions involved. A no-op when running locally.
+if IN_COLAB:
+    import zipfile
+    from google.colab import files
+    zpath = f'/content/brock_{SESSION_TAG}_results.zip'
+    with zipfile.ZipFile(zpath, 'w', zipfile.ZIP_DEFLATED) as z:
+        for sub in ('cached data', 'figures'):     # outputs only, not the .h5
+            for root, _, fns in os.walk(os.path.join(DATA_DIR, sub)):
+                for fn in fns:
+                    p = os.path.join(root, fn)
+                    z.write(p, os.path.relpath(p, DATA_DIR))
+    files.download(zpath)
+else:
+    print('running locally - results are already in', os.path.dirname(H5_FILE))
+"""
+
 # Colab bootstrap cell inserted after the title of every session notebook.
-COLAB_CELL = """\
-# --- Google Colab setup (safe to run anywhere: it is a NO-OP locally) -------
-# On Colab this clones the code, installs the interactive-plot backend, and
-# mounts your Google Drive for the session data (the .h5 is ~200 MB - too
-# big for the git repo, so it comes from Drive instead).
+COLAB_CELL = """# --- Google Colab setup (safe to run anywhere: it is a NO-OP locally) -------
+# NO Google permissions are requested: the data comes in through link-shared
+# file downloads, and results go out as a browser download (last cell).
 #
-# GETTING THE DATA (one-time): ask the lab for the shared 'Treadmill Brock
-# 2025' Drive folder link and open it in your browser. In Drive, click the
-# folder's name -> Organize -> Add shortcut -> My Drive. It then shows up at
-# /content/drive/MyDrive/Treadmill Brock 2025 and DATA_DIR (next cell) works
-# as-is. All RESULTS (tables in 'cached data', SVGs in 'figures') are written
-# back into that same Drive folder, so they persist after the Colab session -
-# download them from drive.google.com. If you only have VIEW access to the
-# shared folder, make a copy into your own Drive instead of a shortcut (the
-# notebook needs to write its outputs next to the data).
+# LAB SETUP (once, by the data owner): in Google Drive, right-click the
+# session .h5 and the trialtable .csv -> Share -> 'Anyone with the link'
+# (Viewer) -> Copy link, and paste the two links below. Students need nothing
+# but this notebook's URL after that.
 import os, sys
 IN_COLAB = 'google.colab' in sys.modules
+
+H5_URL = 'PASTE_DRIVE_LINK_TO_imuData_.h5_HERE'
+TRIALTABLE_URL = 'PASTE_DRIVE_LINK_TO_trialtable_.csv_HERE'
+
 if IN_COLAB:
     if not os.path.isdir('/content/stride_estimation_imu'):
         !git clone -q https://github.com/jeremydwong/stride_estimation_imu.git /content/stride_estimation_imu
     %cd /content/stride_estimation_imu/notebooks
-    !pip install -q ipympl
-    from google.colab import output, drive
+    !pip install -q gdown ipympl
+    from google.colab import output
     output.enable_custom_widget_manager()   # lets the interactive cells work
-    drive.mount('/content/drive')
+    import gdown
+    os.makedirs('/content/brock_data', exist_ok=True)
+    for url, name in ((H5_URL, None), (TRIALTABLE_URL, None)):
+        if url.startswith('http'):
+            gdown.download(url=url, output='/content/brock_data/', fuzzy=True)
+        else:
+            print('!! paste the Drive share links above first (ask the lab)')
 """
 
 
@@ -262,9 +284,8 @@ def build(tag, date):
     src = src.replace(
         "H5_FILE = os.environ.get('STRIDE_DATA_FILE',\n"
         "    '/Users/jeremy/Dropbox/Treadmill Brock 2025/imu data/imuData_s03_s04_20260622.h5')",
-        "# where the session data lives: your Drive on Colab, Dropbox locally\n"
-        "DATA_DIR = ('/content/drive/MyDrive/Treadmill Brock 2025/imu data'\n"
-        "            if 'google.colab' in sys.modules else\n"
+        "# where the session data lives: the gdown folder on Colab, Dropbox locally\n"
+        "DATA_DIR = ('/content/brock_data' if 'google.colab' in sys.modules else\n"
         "            '/Users/jeremy/Dropbox/Treadmill Brock 2025/imu data')\n"
         "H5_FILE = os.environ.get('STRIDE_DATA_FILE',\n"
         f"    os.path.join(DATA_DIR, 'imuData_{tag}_{date}.h5'))")
@@ -472,6 +493,8 @@ def build(tag, date):
     for kind, text in TUTORIAL_CELLS:
         cells.append(md(text.format(tag=tag)) if kind == 'markdown'
                      else code(text.format(tag=tag)))
+
+    cells.append(code(RESULTS_CELL))
 
     for c in cells:
         if c['cell_type'] == 'code':

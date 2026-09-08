@@ -627,3 +627,20 @@ root and open notebooks from notebooks/.
   notebooks + generator.
 - Notebook cell validation now replaces !/% magic lines with `pass` (plain
   stripping broke `if IN_COLAB:` bodies).
+
+### 2026-09-08 (later) — Colab without Google permissions (user: drive.mount
+scope "too powerful", and it was also failing with 'credential propagation
+was unsuccessful' on partial consent)
+
+- drive.mount is GONE. Data in: the lab link-shares just the session .h5 +
+  trialtable .csv ('Anyone with the link', Viewer) and pastes the two links
+  into H5_URL / TRIALTABLE_URL in the bootstrap cell; students' notebooks
+  gdown them into /content/brock_data (DATA_DIR on Colab). Zero consent
+  screens. Results out: a final cell zips ONLY 'cached data' + 'figures'
+  (not the .h5) from DATA_DIR and hands the zip to the browser via
+  files.download() — also permission-free. Everything mirrored in the
+  generator (COLAB_CELL/RESULTS_CELL constants taken verbatim from the
+  patched notebook). Trade-off to note: link-shared files are readable by
+  anyone holding the link.
+- REMAINING for the lab owner: create the two share links and paste them
+  into the bootstrap cell (placeholders say PASTE_DRIVE_LINK_...).
