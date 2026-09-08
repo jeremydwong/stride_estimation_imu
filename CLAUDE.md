@@ -654,3 +654,19 @@ was unsuccessful' on partial consent)
   and points CONDITION_CSV at it. Parsing moved into brock_functions;
   scripts/parse_subinfo_trialtables.py is now a thin CLI over it. In both
   notebooks + generator.
+
+### 2026-09-08 (evening) — interactive widgets were broken by a version clash
+
+The "tried to get a widget" / VS Code dying / Lab+Colab live-scoring failures
+traced to ONE real bug, captured in the notebook's saved traceback:
+`ImportError: cannot import name 'backend2gui' from IPython.core.pylabtools`.
+matplotlib was pinned 3.8.4, which still imports `backend2gui`; IPython
+removed it, and the recently-added ipykernel dev-dep pulled IPython 9.x. Any
+backend switch (the `%matplotlib widget` in ensure_interactive_backend, the
+plt.ioff() exit) exploded. Fix: matplotlib pin 3.8.4 -> 3.9.4 (first version
+compatible with modern IPython). Regression-tested at the kernel level:
+nbconvert-executed a %matplotlib widget + ioff + Button + display(canvas)
+notebook — clean widget-view output. After pulling: restart the Jupyter
+SERVER (new env), hard-refresh the browser. Colab uses its own modern
+matplotlib/IPython so this particular bug never applied there — if Colab
+still misbehaves it is a separate issue (need its error text).
