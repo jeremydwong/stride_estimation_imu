@@ -25,9 +25,18 @@ MASTER = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 COLAB_CELL = """\
 # --- Google Colab setup (safe to run anywhere: it is a NO-OP locally) -------
 # On Colab this clones the code, installs the interactive-plot backend, and
-# mounts your Google Drive for the session data (the .h5 is ~200 MB - too big
-# for the git repo, so put a copy of the 'imu data' folder in your Drive and
-# check DATA_DIR in the next cell points at it).
+# mounts your Google Drive for the session data (the .h5 is ~200 MB - too
+# big for the git repo, so it comes from Drive instead).
+#
+# GETTING THE DATA (one-time): ask the lab for the shared 'Treadmill Brock
+# 2025' Drive folder link and open it in your browser. In Drive, click the
+# folder's name -> Organize -> Add shortcut -> My Drive. It then shows up at
+# /content/drive/MyDrive/Treadmill Brock 2025 and DATA_DIR (next cell) works
+# as-is. All RESULTS (tables in 'cached data', SVGs in 'figures') are written
+# back into that same Drive folder, so they persist after the Colab session -
+# download them from drive.google.com. If you only have VIEW access to the
+# shared folder, make a copy into your own Drive instead of a shortcut (the
+# notebook needs to write its outputs next to the data).
 import os, sys
 IN_COLAB = 'google.colab' in sys.modules
 if IN_COLAB:
