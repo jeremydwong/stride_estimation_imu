@@ -939,7 +939,7 @@ def _render_inspect_block(axes5, feet, pairs, row, period,
                           ymax=(imu.ACCEL_YMAX, imu.FOOTSPEED_YMAX,
                                 imu.STEPSPEED_YMAX),
                           initial_separation=0.2, anchor_mode='firstonly',
-                          i1_abs=None, snug_abs=None):
+                          i1_abs=None, snug_abs=None, i0_abs=None):
     """(Re)draw ONE bout block of the inspection figure onto `axes5`.
 
     Shared by inspect_snipped_trial() and the draggable interactive version.
@@ -963,7 +963,7 @@ def _render_inspect_block(axes5, feet, pairs, row, period,
         axes5[2].text(0.5, 0.5, f'{subject}: foot IMU missing',
                       transform=axes5[2].transAxes, ha='center')
         return None
-    i0 = int(row['start_s'] / period)
+    i0 = int(i0_abs) if i0_abs is not None else int(row['start_s'] / period)
     i1 = int(i1_abs) if i1_abs is not None else int(row['stop_s'] / period)
     try:
         # the stride-variability polyfit warns on very short bouts; harmless
@@ -1227,7 +1227,8 @@ class _DraggableTrial:
             prefix_seconds=self.prefix_seconds, ymax=self.ymax,
             initial_separation=self.initial_separation,
             anchor_mode=self.anchor_mode,
-            i1_abs=st.get('i1_abs'), snug_abs=st.get('snug_abs'))
+            i1_abs=st.get('i1_abs'), snug_abs=st.get('snug_abs'),
+            i0_abs=st.get('i0_abs'))
         blk['res'] = res
         blk['i1_abs'] = st.get('i1_abs')
         self._add_lines(blk)
@@ -1281,13 +1282,18 @@ class _DraggableTrial:
         st = self.state.setdefault(rep_bout, {})
         new_abs = int(round(t0_abs + x / self.period))
         if name == 'snug':
-            # keep the snug inside the mechanized slice and before the end
             j0, j1 = res['slice']
             end_abs = st.get('i1_abs') or int(row['stop_s'] / self.period)
-            st['snug_abs'] = int(np.clip(new_abs, j0, end_abs - 1))
+            st['snug_abs'] = int(min(max(new_abs, 0), end_abs - 1))
+            extend = ''
+            if st['snug_abs'] < j0:
+                # dragged BEFORE the mechanized slice: re-cut the bout from
+                # there (the old behaviour silently clamped to the slice edge)
+                st['i0_abs'] = st['snug_abs']
+                extend = ', slice extended back'
             moved = (st['snug_abs'] - t0_abs) * self.period
             self._say(f'rep {rep_bout[0]} bout {rep_bout[1]}: gait start moved '
-                      f'{moved:+.2f} s (abs sample {st["snug_abs"]}) - '
+                      f'{moved:+.2f} s (abs sample {st["snug_abs"]}{extend}) - '
                       f'recomputing... (axes re-zero to the new t=0)')
         else:
             snug_abs = st.get('snug_abs', t0_abs)

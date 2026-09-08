@@ -670,3 +670,12 @@ notebook — clean widget-view output. After pulling: restart the Jupyter
 SERVER (new env), hard-refresh the browser. Colab uses its own modern
 matplotlib/IPython so this particular bug never applied there — if Colab
 still misbehaves it is a separate issue (need its error text).
+
+- **Snug drag past the slice start now EXTENDS the slice (user: dragged to
+  ~651500, snapped to ~652500).** The release used to clamp the gait-start to
+  the mechanized slice's first sample (slice begins <=1 s before detected
+  onset — nothing integrated earlier to snap to). Now dropping the green line
+  before the slice sets an `i0_abs` override: the bout is re-cut from the
+  dropped sample and re-mechanized (_render_inspect_block gained i0_abs;
+  drag state carries it; status says "slice extended back"). Verified: drop
+  at 651500 -> new slice 651460, t0_abs exactly 651500, steps recomputed.
