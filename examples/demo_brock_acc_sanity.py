@@ -25,7 +25,7 @@ import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 import stride_imu as imu
 from brock_functions import (load_feet, load_trial_bounds, walker_for,
                              process_bout)

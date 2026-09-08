@@ -21,7 +21,7 @@ import os
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from stride_imu.plotting import make_bout_axes, draw_bout_block
 from brock_functions import (load_feet, load_trial_bounds, walker_for,
                              bout_sync_strides_steps)

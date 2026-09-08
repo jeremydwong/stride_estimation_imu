@@ -23,7 +23,7 @@ import os
 import numpy as np
 import h5py
 import matplotlib.pyplot as plt
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 import stride_imu as imu
 
 H5_FILE = os.environ.get(

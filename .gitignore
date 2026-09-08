@@ -48,3 +48,7 @@ Thumbs.db
 *.mov
 *.wmv
 
+
+# Generated Brock figures (they live in the Dropbox imu-data figures folder)
+figures/
+.ipynb_checkpoints/

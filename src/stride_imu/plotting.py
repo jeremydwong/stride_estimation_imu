@@ -8,9 +8,9 @@ from .inertial import GRAVITY, Strides
 # figures compare directly across trials; callers can override per draw call
 # (the batch sets them at the top of the script).
 side_color = {'left': 'tab:blue', 'right': 'tab:red'}
-ACCEL_YMAX = 50.0       # m/s^2, |A| ceiling
-FOOTSPEED_YMAX = 3.0    # m/s, foot speed |V| ceiling
-STEPSPEED_YMAX = 1.6    # m/s, step speed ceiling
+ACCEL_YMAX = 60.0       # m/s^2, |A| ceiling
+FOOTSPEED_YMAX = 4.5    # m/s, foot speed |V| ceiling
+STEPSPEED_YMAX = 1.75   # m/s, step speed ceiling
 
 def plt_ltrl_frwd_strides(strides: 'Strides', show: bool = True):
     """Plot lateral vs forward strides."""
@@ -147,7 +147,7 @@ def compute_cov(x, y, shift_to_zero=True):
 # all share this axis.
 # ---------------------------------------------------------------------------
 
-def draw_accel(ax, data, ymax=ACCEL_YMAX):
+def draw_accel(ax, data, ymax=ACCEL_YMAX, legend=True):
     """Row 1: raw body-frame accelerometer magnitude |A| per foot. Impact spikes
     mark contacts; pre-walk box-handling shows up as activity left of t=0 (the
     snug-up gait start). Carries the absolute-sample-index secondary axis."""
@@ -165,10 +165,11 @@ def draw_accel(ax, data, ymax=ACCEL_YMAX):
     ax.set_ylabel(r'|A| [m/s$^2$]')
     ax.set_ylim(0, ymax)
     ax.grid(alpha=0.3)
-    ax.legend(fontsize=8, loc='upper right', ncols=2)
+    if legend:
+        ax.legend(fontsize=8, loc='upper right', ncols=2)
 
 
-def draw_velocity(ax, data, ymax=FOOTSPEED_YMAX):
+def draw_velocity(ax, data, ymax=FOOTSPEED_YMAX, legend=True):
     """Row 2: |V| per foot with footfall dots and step stars, plus the snug-start
     foot-speed thresholds (horizontal). t=0 is the snug-up gait start."""
     steps = data['steps']
@@ -183,13 +184,14 @@ def draw_velocity(ax, data, ymax=FOOTSPEED_YMAX):
                 alpha=0.9)
     for side in ['left', 'right']:
         ss = data['step_sides'][side]
-        ax.plot(ss['t'], ss['v'], '*', color=side_color[side], ms=15, mec='k',
+        ax.plot(ss['t'], ss['v'], 'o', color=side_color[side], ms=8, mec='k',
                 mew=0.6, linestyle='None',
                 label=f'{side} step' if side == 'left' else None)
     ax.set_ylabel('foot speed |V| [m/s]')
     ax.set_ylim(0, ymax)
     ax.grid(alpha=0.3)
-    ax.legend(fontsize=8, loc='upper right', ncols=3)
+    if legend:
+        ax.legend(fontsize=8, loc='upper right', ncols=3)
 
 
 def draw_step_speed(ax, data, ymax=STEPSPEED_YMAX):
@@ -206,21 +208,25 @@ def draw_step_speed(ax, data, ymax=STEPSPEED_YMAX):
     ax.grid(alpha=0.3)
 
 
-def draw_overhead(ax, data):
-    """Left panel: top-down foot-position map. Each foot is rotated INDEPENDENTLY
-    so its OWN direction of travel — from the snug gait start to its last walking
+def draw_overhead(ax, data, lat_lim=1.0, equal=False, legend=True):
+    """Top-down foot-position map. Each foot is rotated INDEPENDENTLY so its
+    OWN direction of travel — from the snug gait start to its last walking
     contact — points straight up +Y. This is a final, visualization-only rotation
     (the spatial measures in the table come from the shared common frame and are
     untouched); rotating each foot by its own heading keeps both tracks vertical
     even when the two feet's net headings differ by a few degrees.
 
-    Y=0 at the snug gait start. The two feet are drawn `initial_separation` apart
-    at that start — left at -sep/2, right at +sep/2 — so +X = the walker's right
+    Y=0 at the snug gait start, and the drawn path STARTS there — the pre-snug
+    stance-drift squiggle is clipped out (it is exactly the drift the snug
+    exists to remove). The two feet are drawn `initial_separation` apart at
+    that start — left at -sep/2, right at +sep/2 — so +X = the walker's right
     (left foot on the left). Per foot: trajectory (thin), footfall placements
-    (dots) and step landings (stars); the snug start is a green plus.
+    (dots) and step landings (circles); the snug start is a green plus.
 
-    Axes are fixed for cross-trial comparison: X always [-1, 1] m, Y from the
-    start (~0) up to 1.10x the furthest forward point."""
+    lat_lim: fixed lateral half-range in metres (cross-trial comparable).
+    equal: draw at equal x/y scale (adjustable='box' — the axes box narrows to
+    the data's true aspect, so walking tracks appear at honest proportions).
+    Y runs from the start (~0) up to 1.10x the furthest forward point."""
     steps = data['steps']
     snap, sfoot = steps.get('start_snap'), steps.get('start_snap_foot')
     sep = float(data.get('initial_separation', 0.2))
@@ -245,56 +251,76 @@ def draw_overhead(ax, data):
         rel = xy - start
         rx = rel[:, 0] * c - rel[:, 1] * s + sign[side] * sep / 2.0
         ry = rel[:, 0] * s + rel[:, 1] * c
-        fy_all.append(ry)
-        ax.plot(rx, ry, lw=0.6, color=side_color[side], alpha=0.5,
+        # clip the drawn path at the snug start: pre-snug stance drift is
+        # exactly what the snug removes, so it never appears in the view
+        fy_all.append(ry[gi:])
+        ax.plot(rx[gi:], ry[gi:], lw=0.6, color=side_color[side], alpha=0.5,
                 label=f'{side} path')
         if ff is not None and len(ff):
-            ffi = ff[ff < len(rx)]
+            ffi = ff[(ff >= gi) & (ff < len(rx))]
             ax.plot(rx[ffi], ry[ffi], '.', color=side_color[side], ms=7, alpha=0.9)
         sel = steps['leading_foot'] == side
         li = steps['end_idx'][sel].astype(int)
-        li = li[li < len(rx)]
+        li = li[(li >= gi) & (li < len(rx))]
         if len(li):
-            ax.plot(rx[li], ry[li], '*', color=side_color[side], ms=12,
+            ax.plot(rx[li], ry[li], 'o', color=side_color[side], ms=8,
                     mec='k', mew=0.5, ls='None')
         if side == sfoot:
             ax.plot(rx[gi], ry[gi], 'P', color='tab:green', ms=10, mec='k',
                     mew=0.5, ls='None', label='snug start')
     ax.axvline(0, color='gray', lw=0.5, ls=':', alpha=0.5)
-    ax.set_xlim(-1.0, 1.0)                            # always [-1, 1] m laterally
+    ax.set_xlim(-lat_lim, lat_lim)          # fixed for cross-trial comparison
     if fy_all:
         ymax = max(float(f.max()) for f in fy_all)
         ymin = min(float(f.min()) for f in fy_all)
         ax.set_ylim(min(0.0, ymin), ymax * 1.10)     # start (~0) up to 1.10x furthest
+    if equal:
+        ax.set_aspect('equal', adjustable='box')
     ax.set_xlabel('lateral X [m]  (right +)', fontsize=8)
     ax.set_ylabel(r'forward Y [m]  (walk $\uparrow$, 0 = gait start)')
     ax.grid(alpha=0.3)
-    ax.legend(fontsize=6, loc='lower right')
+    if legend:
+        ax.legend(fontsize=6, loc='lower right')
 
 
 def make_bout_axes(fig, subspec):
-    """Lay out one bout inside `subspec`: a tall overhead foot-position panel on
-    the left and accel / foot speed / step speed stacked on the right half.
-    Returns (ax_overhead, ax_accel, ax_vel, ax_step)."""
-    gs = subspec.subgridspec(3, 2, width_ratios=[0.8, 1.0], wspace=0.28, hspace=0.12)
-    ax_over = fig.add_subplot(gs[:, 0])
-    ax_acc = fig.add_subplot(gs[0, 1])
-    ax_vel = fig.add_subplot(gs[1, 1], sharex=ax_acc)
-    ax_step = fig.add_subplot(gs[2, 1], sharex=ax_acc)
-    return ax_over, ax_acc, ax_vel, ax_step
+    """Lay out one bout inside `subspec`: TWO tall overhead foot-position
+    panels on the left (equal-scale narrow strip, then a fixed ±2 m wide view)
+    and accel / foot speed / step speed stacked on the right half.
+    Returns (ax_overhead_equal, ax_overhead_wide, ax_accel, ax_vel, ax_step)."""
+    gs = subspec.subgridspec(3, 3, width_ratios=[0.40, 0.40, 1.0],
+                             wspace=0.32, hspace=0.12)
+    ax_over_eq = fig.add_subplot(gs[:, 0])
+    ax_over_wide = fig.add_subplot(gs[:, 1])
+    ax_acc = fig.add_subplot(gs[0, 2])
+    ax_vel = fig.add_subplot(gs[1, 2], sharex=ax_acc)
+    ax_step = fig.add_subplot(gs[2, 2], sharex=ax_acc)
+    return ax_over_eq, ax_over_wide, ax_acc, ax_vel, ax_step
 
 
-def draw_bout_block(axes4, data, ymax=(ACCEL_YMAX, FOOTSPEED_YMAX, STEPSPEED_YMAX)):
-    """Fill one bout's axes (from make_bout_axes) — overhead + accel/|V|/step.
+def draw_bout_block(axes5, data, ymax=(ACCEL_YMAX, FOOTSPEED_YMAX, STEPSPEED_YMAX)):
+    """Fill one bout's axes (from make_bout_axes) — two overheads (equal-scale
+    and ±2 m wide) + accel/|V|/step.
     ymax = (accel, foot speed, step speed) y-axis ceilings."""
-    ax_over, ax_acc, ax_vel, ax_step = axes4
-    draw_overhead(ax_over, data)
-    draw_accel(ax_acc, data, ymax[0])
-    draw_velocity(ax_vel, data, ymax[1])
+    ax_over_eq, ax_over_wide, ax_acc, ax_vel, ax_step = axes5
+    draw_overhead(ax_over_eq, data, lat_lim=1.0, equal=True, legend=False)
+    draw_overhead(ax_over_wide, data, lat_lim=2.0)
+    ax_over_wide.set_ylabel(None)             # keep the y story on the left one
+    draw_accel(ax_acc, data, ymax[0], legend=False)
+    draw_velocity(ax_vel, data, ymax[1], legend=False)
     draw_step_speed(ax_step, data, ymax[2])
     ax_acc.tick_params(labelbottom=False)     # shared x: only label the bottom plot
     ax_vel.tick_params(labelbottom=False)
     ax_step.set_xlabel('time from snug gait start [s]')
+    # one combined legend for the whole right column, OUTSIDE the frames,
+    # below the step-speed row (under its x-label)
+    handles, labels = ax_acc.get_legend_handles_labels()
+    hv, lv = ax_vel.get_legend_handles_labels()
+    handles += hv; labels += lv
+    leg = ax_step.legend(handles, labels, fontsize=8, ncols=6, frameon=False,
+                         loc='upper center', bbox_to_anchor=(0.5, -0.42))
+    for line in leg.get_lines():          # thicker samples than the 0.6pt plots
+        line.set_linewidth(1.8)
 
 # ---------------------------------------------------------------------------
 # Event-scored session timeline (Brock dataset 2): where were the clicks?
@@ -347,7 +373,7 @@ def draw_event_timeline(aligned, events, report=None, rows=6, figsize=(14, 13),
     are joined by a connector, drawn red/dashed when that rep did not yield the
     expected pair.
 
-    aligned : the compare_to_trials() 'aligned' frame
+    aligned : the align_snips_to_trial_table() 'aligned' frame
     events  : load_events() dict ('label', 'time_s')
     report  : automatically_score_movements_from_events() report; its restarts /
               orphan_stops / short snips get flagged if given.
@@ -364,6 +390,13 @@ def draw_event_timeline(aligned, events, report=None, rows=6, figsize=(14, 13),
     ev_lab = np.asarray(events['label'])
     span_lo = aligned['start_s'].to_numpy(float) / 60.0
     span_hi = aligned['stop_s'].to_numpy(float) / 60.0
+
+    # first bout of every (trial, rep) pair, in table order: the top-axis
+    # trial labels anchor to this bout's snip start (positional indices)
+    ali = aligned.reset_index(drop=True)
+    pair_first = ali.groupby(['trial', 'rep'], sort=False).head(1).index.to_numpy()
+    pair_tick_t = np.where(np.isfinite(span_lo[pair_first]),
+                           span_lo[pair_first], t_min[pair_first])
 
     lo, hi = float(np.nanmin(t_min)), float(np.nanmax(t_min))
     edges = np.linspace(lo - 0.5, hi + 0.5, rows + 1)
@@ -433,6 +466,21 @@ def draw_event_timeline(aligned, events, report=None, rows=6, figsize=(14, 13),
         ax.plot(t_min[xx], exp[xx], 'x', color=TIMELINE_COLORS['missed'],
                 ms=9, mew=2.2, label='missed (interp. time)' if r == 0 else None,
                 zorder=6)
+        # Start press was NOT a go cue: the walker was already moving at the
+        # click (negative reaction time) — flagged by flag_jumped_gun() when
+        # the aligned table carries the column
+        flag = None
+        if 'reaction_s' in aligned:
+            flag = aligned['reaction_s'].to_numpy(float) < 0
+        elif 'jumped_gun' in aligned:
+            flag = aligned['jumped_gun'].fillna(False).to_numpy(bool)
+        if flag is not None:
+            jg = (flag & ~missed & np.isfinite(span_lo)
+                  & (span_lo >= x0) & (span_lo <= x1))
+            ax.plot(span_lo[jg], np.full(jg.sum(), eb1 + 0.55), marker='^',
+                    ls='none', mfc='none', mec='#bf8700', ms=6, mew=1.4,
+                    label='press not a go cue (already walking)'
+                          if r == 0 else None, zorder=4)
 
         ax.set_ylabel('distance [m]')
         ax.grid(axis='y', color='0.93', lw=0.6)
@@ -440,24 +488,29 @@ def draw_event_timeline(aligned, events, report=None, rows=6, figsize=(14, 13),
         for s in ('top', 'right'):
             ax.spines[s].set_visible(False)
 
-        # --- top axis: expected bout-sequence index ---
+        # --- top axis: expected bout-sequence index, one tick per trial-rep
+        # pair, anchored at the START of the pair's first bout (fallback to the
+        # interpolated bout time when that first bout is missed) ---
         top = ax.twiny()
         top.set_xlim(x0, x1)
-        tk = np.where(win & ~missed)[0]
-        tk = tk[::max(1, len(tk) // 8)]
-        top.set_xticks(t_min[tk])
+        tk = pair_first[(pair_tick_t >= x0) & (pair_tick_t <= x1)]
+        tt = pair_tick_t[(pair_tick_t >= x0) & (pair_tick_t <= x1)]
+        top.set_xticks(tt)
         top.set_xticklabels([f'{i}\nT{int(aligned["trial"].iloc[i])}' for i in tk],
-                            fontsize=6.5, color='0.35')
+                            fontsize=6.5, color='0.35', ha='left')
         top.tick_params(length=2, pad=1)
         for s in ('bottom', 'left', 'right'):
             top.spines[s].set_visible(False)
         top.spines['top'].set_color('0.85')
 
     axes[-1].set_xlabel('experiment time [min]')
-    axes[0].set_title('bout distance across experiment time, over the button-press stream\n'
-                      'top axis: expected bout sequence index / trial',
-                      fontsize=10, pad=26)
-    axes[0].legend(loc='upper left', bbox_to_anchor=(0, 1.02), ncol=6,
-                   fontsize=7.5, frameon=False)
-    fig.tight_layout()
+    # title + legend live in dedicated figure space ABOVE all rows, so they
+    # never collide with the first row's per-pair top-axis labels
+    fig.suptitle('bout distance across experiment time, over the button-press '
+                 'stream — top axis: expected bout sequence index / trial',
+                 fontsize=10, y=0.995)
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='upper center', ncol=7, fontsize=7.5,
+               frameon=False, bbox_to_anchor=(0.5, 0.985))
+    fig.tight_layout(rect=(0, 0, 1, 0.955))
     return fig, axes

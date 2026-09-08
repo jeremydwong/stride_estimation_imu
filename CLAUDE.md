@@ -245,3 +245,363 @@ returned a dict (the live one returns `FootTrajectory` via `FootTrajectory(**res
 **Regenerated** `brock_analysis_table.csv` (notebook, 190 bouts) and all 96
 `brock_trial<N>_velocity.svg` + 2 subject grids (batch). Same 2 `LinAlgError`
 skips (trial 76 b1, 96 b2).
+
+### 2026-08-31
+
+**New sessions s05_s06 (20260703) and s07_s08 (20260708) — event auto-scoring.**
+
+- **`parse_subinfo_trialtables.py`** (new): extracts the "Experiment Trials"
+  block from each session sheet of the experimenter's `SubInfo2*.xlsx` and
+  writes `trialtable_<DATE>.csv` in the format `load_condition_table()` already
+  reads (no more hand-made trial tables). Wrote `trialtable_20260703.csv` and
+  `trialtable_20260708.csv` into the Dropbox imu-data folder. Note the xlsx
+  also has a per-sheet "Trial Conditions" mini-table and subject info block;
+  only the trial block is parsed.
+- **`demo_brock_s05_s06_auto.ipynb` / `demo_brock_s07_s08_auto.ipynb`**: clones
+  of `demo_brock_dataset2_auto.ipynb` with paths/titles per session; the
+  s03_s04-specific prose (3-IMU note, press counts) genericized, and section F
+  marked as documenting examples from the session where the method was built.
+- **s07_s08 RAN CLEAN**: 4 foot IMUs present, 192 Starts/189 Stops → 190 snips
+  (4 inferred stops). **188/192 expected bouts matched, median |distance error|
+  0.51 m** → `brock_s07_s08_auto_aligned.csv`. Missed: trial 1 rep 1 (both
+  bouts — no presses under them at all; the session's first trial was never
+  clicked), trial 37 rep 2 bout 2 ("likely real miss"), trial 45 rep 2 bout 2
+  (rep note: "start button accidentally clicked"). Pacing 15 s within-rep /
+  36 s between trials.
+- **s05_s06 BLOCKED — truncated h5.** `imuData_s05_s06_20260703.h5` is 76.7 MB
+  on disk but its HDF5 superblock says 202.8 MB (`OSError: truncated file` on
+  open). Unchanged for hours with Dropbox running and no cached copy — the
+  *upload* to Dropbox was likely incomplete at the source. The notebook is
+  ready; re-sync the file and run it.
+- **Tooling:** `jupyter` was resolving to a global install whose `python3`
+  kernel had no pandas — `ipykernel`, `nbconvert`, `nbformat`, `openpyxl` are
+  now project (dev) deps; execute notebooks with
+  `uv run python -m nbconvert --to notebook --execute --inplace <nb>`.
+
+### 2026-08-31 (later)
+
+**Stop inference rewritten (user: "four-feet-simultaneous is a bad rule").**
+The old `infer_stop_from_quiet` required ALL feet static ≥1.5 s at once — a
+moment that structurally never occurs at the true bout end (the walker hands
+off and turns straight back), so inferred stops slid past the un-clicked
+return walk: 28–41 s "bouts" for 10 s walks (only distance survived, being a
+max-excursion; the snip windows were garbage). New rule: per SUBJECT (own two
+feet, grouped by label suffix), still gaps < `quiet_seconds` are absorbed into
+the motion run (closes within-gait double-stance, ~0.3 s), so the first
+sustained (≥ `min_bout_s`) walk run by either subject ends exactly at a
+≥`quiet_seconds` walker-pair stance — the hand-off. `quiet_seconds` default
+0.75 s: below the shortest observed hand-off stance (0.9 s, s07_s08 t=4952),
+above double-stance. s07_s08 result: all 5 inferred bouts at clicked-typical
+durations, plus a 6th bout recovered that the restart logic used to drop
+(t=8077, 5.4 m) → **189/192 matched** (trial 45 rep 2 regained; remaining
+misses: trial 1 rep 1 never clicked at all, trial 37 rep 2 likely real).
+NOTE: whole-window "most active pair" was tried and is fragile for long
+search windows (the partner's later walks dominate) — first-sustained-run
+avoids choosing a walker at all.
+
+**New in `brock_functions.py`:**
+- `save_trial_figures(data, aligned, session_tag)` — per-trial SVGs, every
+  matched bout stacked (up to 4 blocks: overhead + |A|/foot speed/step speed
+  via `imu.draw_bout_block`), `figures/<tag>/brock_<tag>_trial<N>_viz.svg`.
+  constrained_layout collapses at >2 nested bout blocks → manual gridspec
+  spacing there. RankWarning from short-bout polyfits suppressed
+  (`np.RankWarning` moved to `np.exceptions` in numpy 2 — getattr fallback).
+- `feet_pairs_from_labels()` — label-keyed feet → ('s1'|'s2','left'|'right')
+  keys the stride pipeline wants (a→s1, b→s2).
+- `manual_correct(data, aligned, trials, out_csv=…)` — interactive
+  inspection/rescore: per (trial, rep) figure of raw |A| + mechanized foot
+  speed + horizontal excursion for all feet, current bout windows shaded;
+  'rescore A'/'rescore B' buttons arm a two-click (start, stop) capture per
+  person, 'save' appends to CSV. `ensure_interactive_backend()` raises
+  student-readable setup instructions (INTERACTIVE_HELP: use
+  `uv run jupyter lab` in the browser, not VS Code; `uv sync` + kernel
+  restart for ipympl) BEFORE drawing. Keep the returned controllers in a
+  variable or the buttons get GC'd. `apply_manual_rescore(aligned, csv)`
+  folds corrections back (person→walker-suffix match; missed bouts fill the
+  unmatched row, walker='manual_<p>').
+- `ipympl` + `jupyterlab` added as dev deps.
+
+**`make_brock_session_notebook.py`** (new) — generates a session notebook from
+the s03_s04 master: patches paths/prose/QUIET_SECONDS and appends sections G
+(per-trial figures, `FIG_TRIALS`) and H (manual rescore, `MANUAL_INSPECT=[]`
++ the interactive-setup instructions). `uv run python
+make_brock_session_notebook.py s09_s10 <date>` for the next session.
+
+**Known dubious case, s07_s08 trial 45** (both reps carry accidental-click
+notes): the trial-45 figure shows two `[inferred stop]` blocks with FLAT |A|
+and zero steps yet "measured ~5.4 m" — junk snips whose distance is pure
+integration drift that happens to land near the expected 5 m, so the aligner
+preferred them over the GENUINE b-walk at t=3720 s (4.31 m, now sitting in
+'extra'). All four trial-45 bouts claim an 'a' walker, which is impossible.
+First candidate for `MANUAL_INSPECT = [45]`. Deeper fix if it recurs: make
+snip_distances require footfalls/steps (drift snips have none) instead of raw
+max excursion.
+
+**s05_s06 still blocked** — h5 still truncated at 76.7/202.8 MB.
+
+### 2026-09-02
+
+Iteration from user testing the s07_s08 notebook:
+
+- **Renamed `compare_to_trials` → `align_snips_to_trial_table`** (user-directed:
+  names should say what happens/returns) across brock_functions, all three
+  auto notebooks (source-only patches; outputs kept), the generator, and
+  plotting.py docs. It wraps the NW core `align_snips_to_expected`.
+- **`rescore_brock.py`** (new CLI): the manual_correct figures as native
+  windows from the terminal — `uv run python rescore_brock.py s07_s08 1 37:2`
+  — the zero-Jupyter rescoring path (VS Code interactive plots are
+  unreliable). Reads `brock_<tag>_auto_aligned.csv`, writes the same
+  rescore CSV the notebook fold-in cell reads.
+- **manual_correct window text fields**: each figure has 'from [s]'/'to [s]'
+  TextBoxes; Enter re-slices + re-mechanizes + redraws (plotting moved into
+  `_RescoreFigure.set_window`; `box.eventson=False` around set_val or
+  on_submit recurses). Bad input → status message, no crash.
+- **manual_correct bug**: missed bouts carry `walker=''` (not NaN) —
+  `pd.notna('')` is True so `''[-1]` crashed; blank-or-NaN handled in both
+  manual_correct and apply_manual_rescore.
+- **Event-timeline top axis** (user: labels had "no rhyme or reason"): was
+  every-8th-matched-bout; now one tick per trial-rep pair anchored at the
+  pair's first bout snip START (fallback: interpolated time), ha='left'.
+- **Figure location** (user: not in the git repo): `save_trial_figures`
+  originally wrote to a repo-relative `figures/` — the 48 s07_s08 SVGs were
+  MOVED to `…/Dropbox/Treadmill Brock 2025/imu data/figures/s07_s08/` and the
+  default `out_dir` now derives from the recordings' `file_path` (the
+  'figures' folder next to the session .h5 — the same `imu data/figures` the
+  dataset-1 batch's FIG_DIR points at). `figures/` is gitignored as a
+  backstop. Earlier log lines saying `figures/<tag>/` mean the Dropbox one.
+- **All figures are SVG** (user-directed): saved figures already were
+  (`save_trial_figures` fmt='svg', the batch's per-trial SVGs); the auto
+  notebooks now also render INLINE figures as vector via
+  `%config InlineBackend.figure_formats = ['svg']` in the setup cell (all
+  three notebooks; the generator inherits it from the master). Keep new
+  figure code SVG-first; only drop to PNG if a notebook grows prohibitively
+  large (not the case so far).
+- **Event-timeline legend** moved to dedicated figure space (fig.legend under
+  the suptitle, tight_layout rect) — it used to collide with row 1's top-axis
+  labels, worse after the per-pair tick change.
+- **First-step-erased bug in `steps_from_strides` FIXED** (user spotted it on
+  s07_s08 trial 5 rep 2, both bouts: "we snugged too close, missed the first
+  left step"). The snug itself was fine (snug_start's 1.25/0.2 m/s thresholds
+  put t=0 in the valley before the first committed swing); the gait-init rule
+  was the culprit: it UNCONDITIONALLY dropped "the first-swinging foot's
+  opening stance contact", but when the snip starts at walk onset the swinging
+  foot has no stance plateau in-slice — the heuristic (which infers the first
+  swinger from each foot's SECOND touchdown) then deleted the STANDING foot's
+  genuine stance, so the first landing had no predecessor, no step ended
+  there, and the snugged step 1 silently spanned two real steps. Now the drop
+  fires only when BOTH feet registered the shared pre-walk stance: two
+  contacts at/before snug-g + 0.15 s (`OPENING_MARGIN_S` — the standing
+  foot's plateau often restarts a few samples after g on weight shift, while
+  a real first landing is never before ~0.3 s after g). Full s07_s08 sweep:
+  189 bouts, first-step median 0.52 s, zero sub-0.1 s micro-steps, zero
+  failures; ~30 bouts gained their genuine first step. NOTE: this is in the
+  shared library, so dataset-1 (`brock_analysis.ipynb`) step tables/figures
+  change slightly on next regeneration — notebooks NOT re-executed
+  (user-directed: don't overwrite the ipynb, backend only).
+- **Stance lead-in ON (user-directed redesign of the bout start).** Instead of
+  snip-at-onset + backwards snug, `bout_sync_strides_steps` keeps the opening
+  stance in-slice and lets the mechanization pin it (extended ZUPT):
+  `gravity_seconds` default 0 → 1.0 (un-shelved; its June blockers died with
+  the gait-init fix). Onset + lead-in come from the plain raw-stillness mask
+  (|gyro| < 0.35 rad/s, either-foot-moving) — NOT `detect_quiet_time`, which
+  is a bias-window hunter (thresholds d|W|/dt, demands 1.5 s runs, prunes to
+  ±2σ), found no lead in ~150/189 bouts, and could even place onset after the
+  first swing. Two crucial details: (a) the backwards stance walk may CROSS
+  the click (floor i0 − grav) — the true side-by-side stance often sits just
+  before the Start press, and a foot mid-swing AT the click (jumped gun)
+  walks back to its motion-run start; (b) onset must land within 5 s of the
+  click. snug_start's valley then falls at the pinned-stance end, so t=0 =
+  "where stance ends" with no snug logic change. s07_s08 sweep: 135/189 bouts
+  get ≥0.3 s stance (18 get none — genuinely unreachable, they use the fixed
+  no-stance fallback), negative step lengths 296→183, trial 5's alternating
+  length artifact gone ([0.71 0.64 0.76 0.66] m). All 48 figures regenerated
+  (Dropbox figures/s07_s08). OPEN: `anchor_drift_seconds` reads HIGHER with
+  the lead-in (median 1.7→2.2 s; >2 s flag now on 122/189 bouts) — probably
+  the metric counting the pinned stance as an un-ZUPTed gap; re-derive it
+  before trusting the flag. Also 3 bouts show a ~0.05 s first "step" from a
+  genuine pre-walk foot replant (false start) — consider a min-step-time
+  filter if they pollute step stats.
+- **ensure_interactive_backend** now prints kernel python vs project .venv
+  python with a "switch to THIS one" arrow; notebook H instructions lead with
+  the terminal script, then VS Code kernel-picker (Select Another Kernel →
+  .venv → Restart ↻), then `uv run jupyter lab`. Also documented: after any
+  brock_functions.py edit the kernel must be RESTARTED (module caching).
+
+### 2026-09-03
+
+- **Tutorial section I appended to the session notebooks** ("Student
+  playground — the three data types"): feet (ImuRecording: Wb/Ab/period,
+  sliceable), the tables (conditions + aligned, plain pandas), and the
+  manual_correct controllers. Four runnable cells: raw-signal plot of a bout,
+  DIY compute_position_two_imus re-run, aligned⋈conditions merge with
+  bout-speed-by-condition boxplots, controller inspection. Cells live in
+  `make_brock_session_notebook.TUTORIAL_CELLS` (module-level, reused by
+  in-place patches) and were smoke-run against real s07_s08 data.
+  `_RescoreFigure` gained a `__repr__` (trial/rep, window, bout spans,
+  rescores) so printing controllers is informative.
+- Section G cell now sets `FIGURES_DIR = dirname(H5_FILE)/figures` explicitly
+  and passes `out_dir=` (same place the library default derives — visible to
+  students now). Config cell documents the `os.environ.get` hook (reads an
+  env var if set, never sets one — for pointing the notebook at other files
+  without editing).
+
+### 2026-09-03 (later) — two step-train fixes from user figure review
+
+- **"First step faster than second" SOLVED — it was the SECOND step.** User
+  twice suspected snug zeroing; numerics disproved that (P[g]≈0, step-1
+  displacement == step length). The real bug: step 2's speed came from its
+  foot's first STRIDE, clocked from that foot's PRE-WALK stance touchdown —
+  standing time in the denominator (trial 4 r2b1: 0.37 m/s vs step 1's honest
+  1.0). Fix in steps_from_strides: any step whose inbound contact predates the
+  snug g is recomputed from the trajectory with the clock starting at g ("no
+  step's clock starts before g"). Sweep: s1/s2 medians now 0.95/0.95 vs
+  cruise 1.29 (the natural ramp); old dip class (s2 < 0.5x cruise) 28→4.
+  8 bouts keep s1 > 1.5x cruise = the genuine no-stance drift class.
+- **Terminal landing vanished from the step train FIXED** (trial 1 r2b1: no
+  blue step at ~4.5 s). The final landing's stance runs into the terminal
+  standing, broken only by ~0.1 s weight-shift blips; foot_fall puts ONE
+  footfall per quiet segment at arg-min gyro, which fell in a LATER plateau,
+  so touchdown_map snapped it past the landing. Fix: touchdown_map(period=,
+  bridge_s=0.15) bridges sub-0.15 s non-stationary blips (real swings are
+  >=0.3 s) so chained plateaus form one stance starting at the true landing;
+  the phantom late shuffle-contacts merge away too. period=None keeps the
+  historic behaviour; both call sites pass period.
+- All 48 s07_s08 figures regenerated. NOTE: the June "footfall recall /
+  foot_fall_opposite_velocity" lever is still untouched — mid-walk missed
+  contacts (69 same-foot skips across the session) remain the open item.
+
+### 2026-09-04
+
+- **`inspect_snipped_trial(feet, aligned, trial, ...)` -> Figure** (new,
+  user-directed): the per-trial inspection figure as a first-class playground
+  function. Adds over the old batch-only path: `prefix_seconds` of GREY raw
+  |A| before the walk (what happened around the button press), the Start/Stop
+  presses as green/purple dashed vlines on all right-hand rows, and a
+  "reaction ≈ X s, duration ≈ Y s" box per bout (reaction = Start press ->
+  snug t=0; NEGATIVE = jumped the gun, e.g. trial 4 r1b2 at -0.48 s).
+  Returns the Figure handle. `save_trial_figures` is now a thin batch wrapper
+  over it (same files, same defaults). Tutorial gained cell 5 demoing it.
+- **Naming/docs pass (user: "why is it named data with no type")**: the
+  label-keyed recordings dict is now called `feet` everywhere
+  (inspect_snipped_trial, save_trial_figures, manual_correct,
+  _RescoreFigure); load_available_feet's docstring spells out the
+  {label -> ImuRecording} shape and that it IS the `feet` argument;
+  inspect_snipped_trial's docstring defines `aligned` column-by-column
+  (start_s/stop_s = the snip bounds in session seconds). Playground-facing
+  functions carry undergrad-level docstrings.
+- All 48 s07_s08 figures regenerated with the new annotations.
+
+### 2026-09-04 (later)
+
+- **`interactive_inspect_trial(feet, aligned, trial)` (new)**: the inspection
+  figure with DRAGGABLE bounds. Per bout block, two grab-able vlines on the
+  time axes: green = snug gait start (t=0), purple = bout end (initially the
+  Stop press). Mouse-down grabs the closer line, drag moves it live, release
+  re-runs the bout with the adjusted bounds and redraws in place (time axis
+  re-zeroes to the new snug — the green line snaps back to 0 by design; the
+  status line narrates). Adjustments accumulate in ctrl.state[(rep, bout)] =
+  {'snug_abs', 'i1_abs'} (absolute samples). Plumbing: steps_from_strides
+  gained `force_snap` (slice-rel snug override), bout_sync_strides_steps
+  `force_snug_abs`. inspect_snipped_trial's per-bout drawing was extracted to
+  `_render_inspect_block` (clears axes incl. stale secondary sample-index
+  child axes, so it can redraw in place) — shared by static + interactive.
+  Headless-simulated press/drag/release verified (end-drag 16→13 steps,
+  forced snug lands exactly). Tutorial cell 6 added (both notebooks +
+  generator). Keep the returned controller in a variable or callbacks die.
+
+### 2026-09-04 (later still)
+
+- **interactive_inspect_trial: status + save (user feedback).** (a) The
+  "recomputing..." status was never replaced after the (synchronous) redraw
+  finished — cosmetic, now ends with "recomputed: N steps. Press save...".
+  (b) New 'save adjustments' button (bottom right): appends adjusted bouts to
+  `out_csv` as the SAME (trial, rep, person, start_s, stop_s) rows
+  manual_correct writes, so the existing apply_manual_rescore cell folds them
+  in (manual=True + person attribution) — no table passing / return-catching
+  needed (the figure outlives the function return; the CSV is the hand-off).
+  Original button-press bounds are never modified. start_s saved = the
+  dragged snug time; stop_s = the dragged end; un-dragged sides keep the
+  row's original value. Note: a release only takes effect if the line MOVED
+  (release reads the line position, not the cursor). Tutorial cell 6 now
+  passes out_csv=f'brock_{SESSION_TAG}_manual_rescore.csv'.
+
+### 2026-09-04 (evening)
+
+- **Manual-tool hierarchy clarified (user)**: the draggable inspector is now
+  the documented primary tool for bouts with bad bounds; manual_correct's
+  remaining niche is MISSED bouts (no snip -> nothing to drag; its window is
+  placed from the interpolated bout time). Tutorial cell 4 rewritten around
+  that division; section H markdown leads with it (notebooks + generator).
+- **Reaction time + "press not a go cue" icon (plot E)**:
+  `estimate_reaction_s(feet, aligned)` (new) computes per-bout reaction
+  (Start press -> snug gait start) via a MINI-mechanization: only the
+  walker's two feet over ~8 s around the click, window anchored on a
+  verified both-feet-still stretch, then snug_start's valley — but the first
+  high-speed crossing must open a sustained WALKING RUN (>=3 crossings, <=2.5
+  s gaps) whose end reaches the click, else the first run after it (raw-gyro
+  proxies could not separate energetic box handling from walking: 0.35 rad/s
+  flagged 105/189, swing-level 2.5 rad/s still flagged fumbles). Validated
+  against pipeline annotations (t4: +0.06/-0.48/+0.31 vs +0.05/-0.48/+0.31);
+  t4 r2b2 reads -2.8 vs pipeline +0.75 — genuinely ambiguous pre-click
+  stepping that chains into the walk (the pipeline's slice-at-click hides
+  it). ~6 s for a session. align_snips_to_trial_table now adds reaction_s +
+  jumped_gun columns (and its feet param was renamed from `data`);
+  draw_event_timeline draws an orange open triangle at the Start press of
+  every negative-reaction bout, legend "press not a go cue (already
+  walking)". FINDING: s07_s08 median reaction is -0.27 s and ~60% of bouts
+  are negative — the experimenter generally clicked in RESPONSE to seeing
+  gait start, not as a go cue. E cells in all three notebooks compute the
+  column if absent (estimate_reaction_s import inline).
+
+- **Interactive figure buttons (user)**: taller layout (5.4 in/block + 0.7,
+  always-manual gridspec with a reserved ~1.25 in bottom strip) so the
+  buttons sit BELOW the last block's hanging legend instead of on it; added
+  'close without saving' next to 'save adjustments' (plt.close, discards).
+
+### 2026-09-04 (repo restructure + notebook cache rewiring, user-directed)
+
+**New repo layout (root was "a shitshow"; only config/docs + folders remain):**
+- `src/` — the `stride_imu` package AND `brock_functions.py` (its internal
+  sys.path insert now adds its own dir, so `import stride_imu` works).
+- `notebooks/` — ALL .ipynb: brock_analysis, demo_brock_dataset2_auto (the
+  master), demo_brock_s05_s06_auto, demo_brock_s07_s08_auto, + the two colab
+  ones. Their config cells now do `sys.path.insert(0, abspath('../src'))`.
+- `examples/` — every demo_*.py + matlab_compare.py + debug_missing_stride.py
+  (sys.path inserts point at ../src; demo_matlab_check_two_feet's REPO_DIR is
+  the parent and its .mat ref moved).
+- `scripts/` — rescore_brock.py, parse_subinfo_trialtables.py,
+  make_brock_session_notebook.py (MASTER resolved via __file__ to
+  ../notebooks/, output written there too).
+- `data/` — + matlab_demo4.mat, matlab_demo6.mat.
+- Generated CSVs/SVG left the repo entirely (see cached data below);
+  .ipynb_checkpoints/ gitignored. README run commands updated. NOTE: old
+  demo_two_feet.py-style cwd-relative 'matlab/...' data paths still assume
+  running from repo root (legacy, untouched).
+
+**"cached data" dir (beside figures/, in the imu data folder):** all generated
+tables live there now. Notebook config defines CACHE_DIR / ALIGNED_CSV /
+RESCORE_CSV; cell 15, section H, the fold-in cell, tutorial cell 6, the
+generator, and scripts/rescore_brock.py all use them. Existing
+brock_*_auto_aligned.csv, brock_analysis_table.csv, brock_trial_table.csv,
+brock_trial1_velocity.svg were MOVED to
+`.../imu data/cached data/`. brock_analysis.ipynb writes its table there too.
+
+**Interactive/figure fixes (user feedback):**
+- 'close without saving' now really closes under ipympl: `fig.canvas.close()`
+  (plt.close alone from inside a widget callback can leave the view).
+- Second interactive_inspect_trial call not rendering: figures are now built
+  under `plt.ioff()` and displayed EXPLICITLY via display(fig.canvas) —
+  deterministic single display per call, no reliance on ipympl auto-show.
+- Reaction/duration annotation moved to the |A| axes' bottom-left.
+- Grey raw-|A| context now drawn AFTER the bout end too (same
+  `prefix_seconds` amount), xlim extended right.
+- 'save adjustments' additionally saves the adjusted trial figure as
+  `figures/<tag>/brock_<tag>_trial<N>_viz_manual.svg` (same prefix, _manual
+  suffix) beside the batch figures.
+- Fixed my earlier regex slip in examples/demo_brock_velocity_batch.py
+  (`FOOTSPEED_MAX = 4.5.0` -> 4.5).
+
+Everything compiles; imports verified from notebooks/ cwd; generator builds
+into notebooks/ with correct paths. Git status shows the moves as renames
+(uncommitted — commit when ready). Restart the Jupyter server from the repo
+root and open notebooks from notebooks/.

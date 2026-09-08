@@ -30,7 +30,7 @@ import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from stride_imu.plotting import make_bout_axes, draw_bout_block
 from brock_functions import load_feet, load_trial_bounds, walker_for, bout_sync_strides_steps
 
@@ -44,9 +44,9 @@ DIST_COL = 'Distance (m)'
 PKG_COL = 'Package size'
 
 # Shared figure scales so every trial compares directly. Edit here.
-ACCEL_MAX = 50.0        # m/s^2, |A| y-axis
-FOOTSPEED_MAX = 3.0     # m/s, foot speed |V| y-axis
-STEPSPEED_MAX = 1.6     # m/s, step speed y-axis
+ACCEL_MAX = 60.0        # m/s^2, |A| y-axis
+FOOTSPEED_MAX = 4.5     # m/s, foot speed |V| y-axis
+STEPSPEED_MAX = 1.75     # m/s, step speed y-axis
 YMAX = (ACCEL_MAX, FOOTSPEED_MAX, STEPSPEED_MAX)
 # Overhead axes are fixed in plotting.draw_overhead: X always [-1, 1] m, Y up to
 # 1.10x the furthest forward point.

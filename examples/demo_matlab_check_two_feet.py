@@ -3,18 +3,18 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy.io
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 import stride_imu as imu
 from matlab_compare import compare_arrays, compare_structs, plot_comparison
 
-REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Path to the APDM .h5 files: the Oct 29 pilot recordings that matlab/demo6.m
 # used to generate the matlab_demo6.mat reference (update if needed)
 LEFT_H5_FILE = os.path.join(REPO_DIR, 'data', '20251029-154305_LF_Pilot_Ch_Oct29.h5')
 RIGHT_H5_FILE = os.path.join(REPO_DIR, 'data', '20251029-154310_RF_Pilot_Ch_Oct29.h5')
 
-MATLAB_FILE = os.path.join(REPO_DIR, 'matlab_demo6.mat')
+MATLAB_FILE = os.path.join(REPO_DIR, 'data', 'matlab_demo6.mat')
 
 if __name__ == '__main__':
     print("=== Loading and syncing two IMU data files ===")

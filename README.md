@@ -50,12 +50,12 @@ imu.plt_stride_var(strides)
 
 ## Demos
 
-### Single Foot Analysis (`demo_one_foot.py`)
+### Single Foot Analysis (`examples/demo_one_foot.py`)
 
 Basic stride estimation using a single foot-mounted IMU:
 
 ```bash
-python demo_one_foot.py
+uv run python examples/demo_one_foot.py
 ```
 
 This demo:
@@ -63,12 +63,12 @@ This demo:
 2. Performs inertial mechanization to compute position
 3. Visualizes the 3D trajectory and stride patterns
 
-### Two Feet + Head Analysis (`demo_two_feet_head.py`)
+### Two Feet + Head Analysis (`examples/demo_two_feet_head.py`)
 
 Comprehensive gait analysis using multiple synchronized IMUs:
 
 ```bash
-python demo_two_feet_head.py
+uv run python examples/demo_two_feet_head.py
 ```
 
 This demo:

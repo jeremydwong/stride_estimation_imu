@@ -1,7 +1,7 @@
 import sys
 import os
 import matplotlib.pyplot as plt
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 import stride_imu as imu
 
 # Path to the APDM .h5 files (update if needed)

@@ -1329,13 +1329,30 @@ def _moving_contacts(P: np.ndarray, ff: np.ndarray, threshold: float) -> np.ndar
     return moving
 
 
-def touchdown_map(stationary_periods: np.ndarray) -> np.ndarray:
+def touchdown_map(stationary_periods: np.ndarray, period: Optional[float] = None,
+                  bridge_s: float = 0.15) -> np.ndarray:
     """Map each sample to the START of the stationary run it belongs to (its
     touchdown). Non-stationary samples map to themselves. foot_fall() picks the
     footfall as the arg-min-gyro sample, which wanders within the stance
     plateau; snapping to the run start gives a consistent foot-on-ground
-    instant and stabilizes step/stride timing."""
-    stat = stationary_periods
+    instant and stabilizes step/stride timing.
+
+    When `period` is given, non-stationary blips shorter than `bridge_s` are
+    bridged first, so plateaus chained by micro-shuffles count as ONE stance
+    starting at the true landing. Without this, the walker's FINAL landing —
+    whose stance runs straight into the terminal standing, broken only by
+    ~0.1 s weight-shift blips — got its footfall snapped to a later plateau
+    and the last step vanished from the train (s07_s08 trial 1 rep 2: left
+    lands at 4.50 s, touchdown reported 5.16 s). Real swings are >=0.3 s, so
+    0.15 s bridges only blips. period=None keeps the historic behaviour."""
+    stat = np.asarray(stationary_periods, bool).copy()
+    if period is not None and bridge_s > 0:
+        n = max(1, int(bridge_s / period))
+        padded = np.r_[False, stat, False]
+        edges = np.flatnonzero(padded[1:] != padded[:-1])
+        for gap_a, gap_b in zip(edges[1::2], edges[2::2]):
+            if gap_b - gap_a <= n:
+                stat[gap_a:gap_b] = True
     rs = np.arange(len(stat))
     for i in range(1, len(stat)):
         if stat[i] and stat[i - 1]:
@@ -1489,7 +1506,8 @@ def steps_from_strides(left_strides: 'Strides', right_strides: 'Strides',
                        min_stride_displacement: float = 0.2,
                        anchor_mode: str = 'auto',
                        start_high: float = DEFAULT_START_FOOTSPEED_HIGH,
-                       start_low: float = DEFAULT_START_FOOTSPEED_LOW) -> Dict[str, Any]:
+                       start_low: float = DEFAULT_START_FOOTSPEED_LOW,
+                       force_snap: Optional[int] = None) -> Dict[str, Any]:
     """Segment steps from the merged foot-CONTACT train of the two feet, taking
     speed from the validated per-foot strides and placing both feet in one frame.
 
@@ -1517,9 +1535,11 @@ def steps_from_strides(left_strides: 'Strides', right_strides: 'Strides',
         (signed; positive = normal stance, negative = crossover). These carry the
         anchor assumption (see _common_frame and anchor_drift_seconds).
 
-    Gait initiation: both feet share the opening pre-walk stance, so each foot's
-    first touchdown is the same contact. The opening of whichever foot swings
-    first is dropped so the contact train stays alternating. The FIRST step is
+    Gait initiation: when both feet registered the shared pre-walk stance (two
+    contacts at/before the snug start), the opening of whichever foot swings
+    first is dropped so the contact train stays alternating. When the snip
+    begins at walk onset the swinging foot has no stance plateau in-slice —
+    the train already alternates and nothing is dropped. The FIRST step is
     then "snugged" (snug_start): its start/time/speed AND length/width are moved
     to the velocity valley before the first committed swing, removing the bogus
     long, fast first step that pre-walk drift produces. Since drift before the
@@ -1557,7 +1577,7 @@ def steps_from_strides(left_strides: 'Strides', right_strides: 'Strides',
         snapped FF_walking indices. speed_at: {snapped stride-end index -> forward
         speed} for completed strides (first wins). prev_td: {touchdown -> previous
         touchdown}, used to recover a step speed from P when a stride was dropped."""
-        td = touchdown_map(info.stationary_periods)
+        td = touchdown_map(info.stationary_periods, period)
         ff = np.where(info.FF_walking)[0]
         touchdowns = np.unique(td[ff]).astype(int) if ff.size else np.array([], int)
         speed_at = {}
@@ -1587,11 +1607,34 @@ def steps_from_strides(left_strides: 'Strides', right_strides: 'Strides',
     contacts = [(int(i), 'left') for i in L_td] + [(int(i), 'right') for i in R_td]
     contacts.sort(key=lambda c: c[0])
 
-    # Drop the first-swinging foot's opening stance contact (see docstring).
-    l_next = L_td[1] if len(L_td) > 1 else np.inf
-    r_next = R_td[1] if len(R_td) > 1 else np.inf
-    first_swing = 'left' if l_next <= r_next else 'right'
-    contacts.remove((int(L_td[0] if first_swing == 'left' else R_td[0]), first_swing))
+    # snug sample g = velocity valley before the first committed swing; needed
+    # here to recognize opening stances, reported/used for step 1 further down.
+    # force_snap (slice-relative sample) overrides the detected snug — used by
+    # the interactive inspector when the user drags the gait-start marker.
+    g, gfoot = snug_start(left_info, right_info, start_high, start_low)
+    if force_snap is not None:
+        g = int(np.clip(force_snap, 0, len(left_info.Vm) - 1))
+
+    # Drop the first-swinging foot's opening stance contact (see docstring) —
+    # but ONLY when both feet actually registered their shared pre-walk stance
+    # (two contacts at/before the snug start g). When the snip begins at walk
+    # onset, the first-swinging foot never stands long enough in-slice to get a
+    # stance plateau: the train already alternates, and the unconditional drop
+    # used to delete the STANDING foot's genuine stance — erasing the first
+    # step entirely (its landing had no predecessor; seen as s07_s08 trial 5
+    # rep 2, both bouts, where step 1 silently spanned two real steps).
+    # The margin: the standing foot's plateau often RESTARTS a few samples
+    # after g (weight shift as the other foot swings out), while a genuine
+    # first landing is never before ~0.3 s after g — 0.15 s separates them.
+    OPENING_MARGIN_S = 0.15
+    g_lim = np.inf if g is None else g + int(OPENING_MARGIN_S / period)
+    opening = [c for c in contacts[:2] if c[0] <= g_lim]
+    if len(opening) == 2:
+        l_next = L_td[1] if len(L_td) > 1 else np.inf
+        r_next = R_td[1] if len(R_td) > 1 else np.inf
+        first_swing = 'left' if l_next <= r_next else 'right'
+        contacts.remove((int(L_td[0] if first_swing == 'left' else R_td[0]),
+                         first_swing))
 
     out = {'leading_foot': [], 'end_idx': [], 'start_idx': [], 'time': [],
            'frwd_speed': [], 'length': [], 'width': []}
@@ -1602,13 +1645,19 @@ def steps_from_strides(left_strides: 'Strides', right_strides: 'Strides',
                 n_same_foot_skips += 1
             continue
         spd = spd_map[f1].get(i1, np.nan)
-        if not np.isfinite(spd):
-            # Inbound stride dropped by the >2 s cap (gait initiation): recover
-            # forward speed from the mechanized trajectory.
-            prev = prev_map[f1].get(i1, i0)
+        prev = prev_map[f1].get(i1, i0)
+        if not np.isfinite(spd) or (g is not None and prev < g):
+            # Recover speed from the mechanized trajectory when the inbound
+            # stride was dropped by the >2 s cap (gait initiation), OR when it
+            # is clocked from a PRE-WALK stance (prev contact before the snug
+            # start g): a stride-time that includes standing makes the early
+            # steps read absurdly slow (e.g. step 2 at 0.37 m/s while step 1,
+            # snug-clocked, reads 1.0 — the "first step faster than second"
+            # artifact). No step's clock starts before g.
+            lo = prev if g is None else max(prev, g)
             P = P_map[f1]
-            dist = float(np.linalg.norm(P[i1, :2] - P[prev, :2]))
-            spd = dist / max((i1 - prev) * period, period)
+            dist = float(np.linalg.norm(P[i1, :2] - P[lo, :2]))
+            spd = dist / max((i1 - lo) * period, period)
         iL, iR = (i1, i0) if f1 == 'left' else (i0, i1)
         out['leading_foot'].append(f1)
         out['start_idx'].append(i0)
@@ -1637,8 +1686,7 @@ def steps_from_strides(left_strides: 'Strides', right_strides: 'Strides',
     # snugged window only. Drift before the snug start is ignored, so length is
     # the leading foot's forward travel since g (subtracting its position at g)
     # and width is taken as the assumed initial side-by-side separation.
-    g, gfoot = snug_start(left_info, right_info, start_high, start_low)
-    result['start_snap'] = g
+    result['start_snap'] = g            # computed above, before the contact train
     result['start_snap_foot'] = gfoot
     if g is not None and len(result['time']):
         lead = result['leading_foot'][0]
