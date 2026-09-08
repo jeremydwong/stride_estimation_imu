@@ -440,6 +440,8 @@ def compute_position(W: np.ndarray, A: np.ndarray, period: float, USE_KF: int = 
     Compatibility note: this legacy path is unchanged. The opt-in alternative
     ``experimental.compute_position_experimental`` adds gravity-vector tilt,
     independent tilt gates, and explicit gyro-bias calibration for turn studies.
+    ``experimental.compute_position_stride_gravity`` instead estimates tilt
+    from the whole contact-to-contact stride (offline, also explicitly opt-in).
 
     Parameters:
     -----------

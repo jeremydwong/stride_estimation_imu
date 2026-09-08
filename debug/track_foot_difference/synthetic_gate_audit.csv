@@ -1,0 +1,5 @@
+foot,noise,tilt_gate_samples,accepted_accelerating_samples
+left,False,8960,256
+right,False,8960,256
+left,True,8960,256
+right,True,8960,256

@@ -52,6 +52,26 @@ imu.plt_stride_var(strides)
 
 ## Demos
 
+### Track walking investigation
+
+[`notebooks/debug_track_foot_difference.ipynb`](notebooks/debug_track_foot_difference.ipynb)
+compares the included October 29 left/right track bout, diagnoses endpoint-based
+plot alignment, and sweeps tilt/footfall settings and gyro-bias calibration.
+Reproduce the extraction, metrics, and figures headlessly:
+
+```bash
+python scripts/debug_track_foot_difference.py
+python scripts/debug_track_extended.py
+python -m unittest discover -s tests -v
+```
+
+The strongest candidate, `stride_imu.experimental.compute_position_stride_gravity`,
+uses the whole contact-to-contact stride to estimate tilt. It reduces both
+horizontal disagreement and vertical drift, without enforcing track geometry or
+loop closure. It is offline and explicitly opt-in; existing single- and two-foot
+processing remains unchanged. The notebook includes a separate real bout,
+synthetic tracks with known truth, calibration sensitivity, and rejected controls.
+
 ### Single Foot Analysis (`examples/demo_one_foot.py`)
 
 Basic stride estimation using a single foot-mounted IMU:

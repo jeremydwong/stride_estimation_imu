@@ -28,7 +28,7 @@ FILES = {'left': '20251029-154305_LF_Pilot_Ch_Oct29.h5',
 DEFAULT_OUTPUT = ROOT / 'debug' / 'track_foot_difference'
 
 
-def extract_track_bout(output=DEFAULT_OUTPUT):
+def extract_track_bout(output=DEFAULT_OUTPUT, *, bout_rank=0):
     """Copy demo detection/longest-near-16:34 selection, using BOTH actual files.
 
     Select independently to audit detection, then use the union of both selected
@@ -45,7 +45,7 @@ def extract_track_bout(output=DEFAULT_OUTPUT):
         matches = imu.find_bouts_near_time(bouts, rec.time_datetime, time(16,34), 240)
         if not matches:
             raise ValueError(f'No track candidates for {side}')
-        chosen[side] = max(matches, key=lambda b: b.duration_seconds)
+        chosen[side] = sorted(matches, key=lambda b: b.duration_seconds, reverse=True)[bout_rank]
         candidates[side] = [{'start': rec.time_datetime[b.start_idx].isoformat(),
                              'duration_s': b.duration_seconds} for b in matches]
     start = min(rec.raw_time[chosen[s].start_idx] for s, rec in records.items())
@@ -54,7 +54,7 @@ def extract_track_bout(output=DEFAULT_OUTPUT):
     if not np.isclose(period, records['right'].period):
         raise ValueError('Different sampling periods; this experiment requires matching rates')
     arrays = {'period': period}
-    metadata.update(candidates=candidates, selected={}, calibration={})
+    metadata.update(candidates=candidates, selected={}, calibration={}, bout_rank=bout_rank)
     for side, rec in records.items():
         b = chosen[side]
         idx = np.flatnonzero((rec.raw_time >= start) & (rec.raw_time <= end))
@@ -66,6 +66,10 @@ def extract_track_bout(output=DEFAULT_OUTPUT):
         # complete detector-selected intervals, matching the initial experiment.
         before = rec.Wb[b.quiet_before_idx:b.start_idx]
         after = rec.Wb[b.end_idx:b.quiet_after_idx]
+        arrays[side+'_quiet_before_W'] = before
+        arrays[side+'_quiet_before_A'] = rec.Ab[b.quiet_before_idx:b.start_idx]
+        arrays[side+'_quiet_after_W'] = after
+        arrays[side+'_quiet_after_A'] = rec.Ab[b.end_idx:b.quiet_after_idx]
         arrays[side+'_bias_before'] = np.median(before, axis=0)/period
         arrays[side+'_bias_after'] = np.median(after, axis=0)/period
         metadata['selected'][side] = dict(start=rec.time_datetime[s].isoformat(),
