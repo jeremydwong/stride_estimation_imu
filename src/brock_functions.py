@@ -403,6 +403,62 @@ def automatically_score_movements_from_events(events, bounding_window_s=30.0,
     return snips, report
 
 
+def list_xlsx_sheets(xlsx_path):
+    """Names of the session sheets in a SubInfo2-style workbook.
+
+    Ask the workbook what it contains (don't memorize): returns e.g.
+    ['s01_s02', 's03_s04', ...]. Non-session sheets (like 'Summary Stats')
+    are included too — pick the one matching your SESSION_TAG.
+    """
+    import openpyxl
+    return openpyxl.load_workbook(xlsx_path, read_only=True).sheetnames
+
+
+def trialtable_from_xlsx(xlsx_path, sheet_name, out_dir):
+    """Build trialtable_<date>.csv from one sheet of the SubInfo2 workbook.
+
+    Each session sheet carries an 'Experiment Trials' block (Trial #, rand #,
+    Distance (m), Package size, Hand-off pose, Rep1/Rep2 status, Notes). This
+    extracts it and writes the CSV load_condition_table() reads, named by the
+    sheet's Date row, into `out_dir`. Returns the CSV path.
+
+    Typical use in a notebook (Colab: upload the .xlsx first):
+        CONDITION_CSV = trialtable_from_xlsx(xlsx, SESSION_TAG, DATA_DIR)
+    """
+    import re
+    import openpyxl
+    ws = openpyxl.load_workbook(xlsx_path, data_only=True)[sheet_name]
+    date = None
+    header_pos = None
+    for row in ws.iter_rows():
+        for cell in row:
+            if cell.value == 'Date':
+                raw = ws.cell(row=cell.row, column=cell.column + 1).value
+                if raw is not None:
+                    date = re.sub(r'\D', '', str(raw)[:10])
+            if cell.value == 'Trial #':
+                header_pos = (cell.row, cell.column)
+    if header_pos is None:
+        raise ValueError(f'sheet {sheet_name!r}: no "Trial #" header found - '
+                         f'is this a session sheet? (see list_xlsx_sheets)')
+    columns = ['Trial #', 'rand #', 'Distance (m)', 'Package size',
+               'Hand-off pose', 'Rep1 status', 'Rep2 status', 'Notes']
+    r0, c0 = header_pos
+    records = []
+    for r in range(r0 + 1, ws.max_row + 1):
+        vals = [ws.cell(row=r, column=c0 + k).value for k in range(len(columns))]
+        if not isinstance(vals[0], (int, float)):
+            break
+        records.append(vals)
+    df = pd.DataFrame(records, columns=columns)
+    if not date or df.empty or df['Distance (m)'].isna().all():
+        raise ValueError(f'sheet {sheet_name!r}: no date or empty trial block')
+    df['Trial #'] = df['Trial #'].astype(int)
+    out = os.path.join(out_dir, f'trialtable_{date}.csv')
+    df.to_csv(out, index=False)
+    return out
+
+
 def load_condition_table(csv_path):
     """Processed condition table for the event-scored sessions.
 

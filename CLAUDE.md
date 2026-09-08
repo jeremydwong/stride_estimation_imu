@@ -644,3 +644,13 @@ was unsuccessful' on partial consent)
   anyone holding the link.
 - REMAINING for the lab owner: create the two share links and paste them
   into the bootstrap cell (placeholders say PASTE_DRIVE_LINK_...).
+
+- **xlsx -> trialtable in the notebook (user)**: new optional cell after the
+  config cell — `BUILD_TRIALTABLE_FROM_XLSX = True` uploads the SubInfo2
+  .xlsx on Colab (files.upload; reads the Dropbox copy locally), prints
+  `list_xlsx_sheets()` so the student picks from the actual sheet list
+  (default: the sheet named like SESSION_TAG), and
+  `trialtable_from_xlsx(xlsx, sheet, DATA_DIR)` writes trialtable_<date>.csv
+  and points CONDITION_CSV at it. Parsing moved into brock_functions;
+  scripts/parse_subinfo_trialtables.py is now a thin CLI over it. In both
+  notebooks + generator.

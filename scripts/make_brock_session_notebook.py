@@ -40,6 +40,28 @@ else:
     print('running locally - results are already in', os.path.dirname(H5_FILE))
 """
 
+XLSX_CELL = """# --- OPTIONAL: build the trialtable CSV from the experimenter's xlsx --------
+# If there is no trialtable_<date>.csv yet (or no TRIALTABLE_URL), generate it
+# from the SubInfo2 workbook. On Colab this prompts you to UPLOAD the .xlsx
+# (small file); locally it reads the copy beside the imu data. The available
+# sheet names are printed - the one matching SESSION_TAG is used unless you
+# set SHEET yourself.
+BUILD_TRIALTABLE_FROM_XLSX = False    # set True to use this path
+SHEET = None                          # None = the sheet named like SESSION_TAG
+
+if BUILD_TRIALTABLE_FROM_XLSX:
+    from brock_functions import list_xlsx_sheets, trialtable_from_xlsx
+    if IN_COLAB:
+        from google.colab import files
+        up = files.upload()           # choose your SubInfo2*.xlsx
+        xlsx = next(iter(up))
+    else:
+        xlsx = os.path.join(DATA_DIR, 'SubInfo2(2).xlsx')
+    print('sheets in this workbook:', list_xlsx_sheets(xlsx))
+    CONDITION_CSV = trialtable_from_xlsx(xlsx, SHEET or SESSION_TAG, DATA_DIR)
+    print('trialtable written ->', CONDITION_CSV)
+"""
+
 # Colab bootstrap cell inserted after the title of every session notebook.
 COLAB_CELL = """# --- Google Colab setup (safe to run anywhere: it is a NO-OP locally) -------
 # NO Google permissions are requested: the data comes in through link-shared
@@ -334,6 +356,9 @@ def build(tag, date):
         '                           # shorter than a hand-off stance (~0.9 s observed)\n'
         '                           # and longer than within-gait double-stance (~0.3 s)\n')
     cells[2]['source'] = src.splitlines(keepends=True)
+
+    # --- optional xlsx->trialtable cell after config ---
+    cells.insert(3, code(XLSX_CELL))
 
     # --- section A markdown: describe the per-person stop inference ---
     src = ''.join(cells[3]['source'])
