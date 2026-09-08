@@ -1744,7 +1744,11 @@ def manual_correct(feet, aligned, trials, out_csv='brock_manual_rescore.csv',
         hi = np.nanmax(np.r_[group['stop_s'].to_numpy(float),
                              group['_est_t'].to_numpy(float) + typical])
 
-        fig, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
+        # built under ioff() and displayed explicitly at the end: relying on
+        # ipympl auto-show fails when the backend was switched mid-cell (the
+        # figure simply never appears - same fix as interactive_inspect_trial)
+        with plt.ioff():
+            fig, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
         fig.subplots_adjust(bottom=0.16, hspace=0.08)
         fig.suptitle(f'{session_tag} trial {trial} rep {rep} - inspect / rescore'
                      f'   (A blue, B orange; missed bouts have no shading)')
@@ -1773,6 +1777,9 @@ def manual_correct(feet, aligned, trials, out_csv='brock_manual_rescore.csv',
                   f'(save first if you rescored)')
             plt.show(block=True)
     if mode == 'notebook' and controllers:
+        from IPython.display import display
+        for ctrl in controllers:
+            display(ctrl.fig.canvas)
         print(f'{len(controllers)} figure(s) above. Rescore with the buttons, '
               f'then press save on each figure you changed; corrections land '
               f'in {out_csv}.')
