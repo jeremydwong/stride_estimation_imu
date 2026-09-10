@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.ticker import Locator
 from typing import Any, Dict
 from .inertial import GRAVITY, Strides
 
@@ -147,6 +148,24 @@ def compute_cov(x, y, shift_to_zero=True):
 # all share this axis.
 # ---------------------------------------------------------------------------
 
+class EndSampleLocator(Locator):
+    """Only first/last round sample indices inside the current view.
+
+    Hundreds for normal bout spans; tens/units if zoomed into fewer than two
+    hundred-sample ticks. A live locator also handles inspector zoom/redraw.
+    """
+    def tick_values(self, vmin, vmax):
+        lo, hi = sorted((vmin, vmax))
+        for step in (100, 10, 1):
+            first, last = np.ceil(lo / step) * step, np.floor(hi / step) * step
+            if first < last:
+                return np.array([first, last])
+        return np.array([first]) if first <= last else np.array([])
+
+    def __call__(self):
+        return self.tick_values(*self.axis.get_view_interval())
+
+
 def draw_accel(ax, data, ymax=ACCEL_YMAX, legend=True):
     """Row 1: raw body-frame accelerometer magnitude |A| per foot. Impact spikes
     mark contacts; pre-walk box-handling shows up as activity left of t=0 (the
@@ -161,6 +180,7 @@ def draw_accel(ax, data, ymax=ACCEL_YMAX, legend=True):
         'top', functions=(lambda x, o=t0_abs: x / period + o,
                           lambda s, o=t0_abs: (s - o) * period))
     secax.set_xlabel('absolute sample index', fontsize=8)
+    secax.xaxis.set_major_locator(EndSampleLocator())
     secax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f'{v:.0f}'))
     ax.set_ylabel(r'|A| [m/s$^2$]')
     ax.set_ylim(0, ymax)

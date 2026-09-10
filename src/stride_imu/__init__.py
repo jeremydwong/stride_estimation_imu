@@ -7,7 +7,7 @@ from .apdm import (
 
 from .inertial import (
     WalkingBout, FootTrajectory, Strides, detect_quiet_periods, detect_walking_section, compute_position, stride_segmentation,
-    steps_from_strides, touchdown_map, snug_start,
+    steps_from_strides, touchdown_map, snug_start, snug_end,
     compute_position_two_imus, detect_walking_bouts, find_bouts_near_time
 )
 

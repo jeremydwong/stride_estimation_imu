@@ -124,7 +124,7 @@ def first_motion(W, period):
 
 def bout_sync_strides_steps(feet, subject, i0, i1, period,
                   initial_separation=0.2, anchor_mode='firstonly',
-                  gravity_seconds=1.0, force_snug_abs=None):
+                  gravity_seconds=1.0, force_snug_abs=None, snug_end_enabled=True):
     """Walk-onset snip + stride pipeline for one bout; pull out the series the
     figure needs (|A| and |V| per foot, footfalls, steps, snug start).
 
@@ -144,6 +144,11 @@ def bout_sync_strides_steps(feet, subject, i0, i1, period,
     the standing footfall fought the OLD unconditional gait-init drop (fixed
     2026-09-02). The separate An[0] init bug fix (in compute_position) is
     always on.
+
+    snug_end_enabled: trim to the settling valley after the last committed
+    swing (snug_start in reverse), then rerun mechanization/strides on that
+    window so the final ZUPT and step metrics use the trimmed end. An explicit
+    inspector end override disables automatic end trimming.
     """
     # Walk onset + opening-stance lead-in, from the subject's RAW stillness
     # (|gyro| < STILL_RAD_S rad/s on either foot = moving). detect_quiet_time
@@ -178,6 +183,15 @@ def bout_sync_strides_steps(feet, subject, i0, i1, period,
     lead = min(grav, int(run[0]) if len(run) else len(still_before))
     snip = max(0, onset - lead)
     result = process_bout(feet, subject, snip, i1, period, pad_seconds=0.0)
+    end_foot = None
+    if snug_end_enabled:
+        end_snap, end_foot = imu.snug_end(result['left_info'], result['right_info'])
+        if end_snap is not None:
+            # snug_end is inclusive; processing slices are exclusive at i1.
+            trimmed_stop = result['slice'][0] + end_snap + 1
+            if snip + 2 <= trimmed_stop < result['slice'][1]:
+                result = process_bout(feet, subject, snip, trimmed_stop, period,
+                                      pad_seconds=0.0)
     # force_snug_abs: absolute sample to pin the snug gait start to (interactive
     # override of snug_start's detection); converted to slice-relative here
     force_snap = (None if force_snug_abs is None
@@ -187,6 +201,8 @@ def bout_sync_strides_steps(feet, subject, i0, i1, period,
                                    initial_separation=initial_separation,
                                    anchor_mode=anchor_mode, force_snap=force_snap)
     j0, j1 = result['slice']
+    steps['end_snap'] = j1 - j0 - 1
+    steps['end_snap_foot'] = end_foot
     # time axis referenced to the SNUG-UP sample (best estimate of gait start):
     # t=0 = snug start, the manually-clipped pre-walk sits at negative t. Fall back
     # to the detected onset if no snug was found.
@@ -216,7 +232,8 @@ def bout_sync_strides_steps(feet, subject, i0, i1, period,
     # the pipeline. This dict is the single per-bout result for both the batch
     # figures and the notebook table.
     return {'subject': subject, 'period': period, 'onset': onset,
-            't_ref': t_ref, 't0_abs': t0_abs, 'slice': (j0, j1), 't': t,
+            't_ref': t_ref, 't0_abs': t0_abs, 'end_abs': j1 - 1,
+            'slice': (j0, j1), 't': t,
             'sides': sides, 'step_sides': step_sides, 'steps': steps,
             'n_strides': n_strides, 'initial_separation': initial_separation,
             'left_info': result['left_info'], 'right_info': result['right_info'],
@@ -958,7 +975,7 @@ def _render_inspect_block(axes5, feet, pairs, row, period,
              f"{row['walker']} walks - expected {row['distance_m']:.1f} m, "
              f"measured {row['measured_m']:.1f} m"
              + (' [inferred stop]' if row.get('inferred') else ''))
-    axes5[0].set_title(title, loc='left', fontsize=10, fontweight='bold')
+    axes5[0].set_title(title, loc='left', fontsize=10, fontweight='bold', pad=34)
     if (subject, 'left') not in pairs or (subject, 'right') not in pairs:
         axes5[2].text(0.5, 0.5, f'{subject}: foot IMU missing',
                       transform=axes5[2].transAxes, ha='center')
@@ -976,7 +993,8 @@ def _render_inspect_block(axes5, feet, pairs, row, period,
             res = bout_sync_strides_steps(
                 pairs, subject, i0, i1, period,
                 initial_separation=initial_separation,
-                anchor_mode=anchor_mode, force_snug_abs=snug_abs)
+                anchor_mode=anchor_mode, force_snug_abs=snug_abs,
+                snug_end_enabled=i1_abs is None and row.get('manual', False) != True)
         imu.draw_bout_block(axes5, res, ymax=ymax)
 
         ax_acc = axes5[2]
@@ -998,17 +1016,35 @@ def _render_inspect_block(axes5, feet, pairs, row, period,
                             color='0.6', alpha=0.8, zorder=1)
         # the button presses (the snip bounds), as vertical trigger lines
         for t_ev, color, lab in (((i0 - t0_abs) * period, '#1a7f37', 'Start press'),
-                                 ((i1 - t0_abs) * period, '#8250df', 'Stop press')):
+                                 ((i1 - t0_abs) * period, '#666666', 'Stop press')):
             for ax in axes5[2:]:
                 ax.axvline(t_ev, color=color, lw=1.0, ls='--', alpha=0.8,
                            zorder=2)
             ax_acc.text(t_ev, ymax[0] * 0.97, lab, color=color, fontsize=7,
                         ha='center', va='top')
         reaction_s = (t0_abs - i0) * period    # Start press -> snug t=0
-        duration_s = (i1 - t0_abs) * period    # snug t=0 -> Stop press
+        duration_s = (res['end_abs'] - t0_abs) * period
+        end_is_manual = i1_abs is not None or row.get('manual', False) == True
+        end_label = ('Manual end' if end_is_manual else
+                     'Snug end' if res['steps']['end_snap_foot'] is not None else
+                     'Window end (no strong swing)')
+        trimmed_s = max(0., (i1 - 1 - res['end_abs']) * period)
+        for ax in axes5[2:]:
+            ax.axvline(duration_s, color='tab:purple', lw=2, ls='-',
+                       label=end_label, zorder=4)
+            if trimmed_s > 0:
+                ax.axvspan(duration_s, (i1 - t0_abs) * period,
+                           color='tab:purple', alpha=.07, zorder=0)
+        ax_acc.annotate(end_label, xy=(duration_s, .83),
+                        xycoords=('data', 'axes fraction'),
+                        xytext=(-6, 0), textcoords='offset points',
+                        ha='right', va='top', color='tab:purple', fontsize=8,
+                        fontweight='bold', bbox=dict(fc='white', ec='none', alpha=.8))
         ax_acc.text(0.01, 0.04,
                     f'reaction ≈ {reaction_s:.2f} s, '
-                    f'duration ≈ {duration_s:.1f} s',
+                    f'gait duration ≈ {duration_s:.1f} s; '
+                    + (f'end trimmed {trimmed_s:.2f} s' if not end_is_manual
+                       else 'manual end'),
                     transform=ax_acc.transAxes, fontsize=8, va='bottom',
                     bbox=dict(fc='white', ec='0.8', alpha=0.8, pad=2))
         ax_acc.set_xlim(left=min(-prefix_seconds,
@@ -1024,9 +1060,7 @@ def _render_inspect_block(axes5, feet, pairs, row, period,
 
 def _inspect_layout(fig, n_rows):
     """Gridspec for n stacked bout blocks (constrained_layout collapses >2)."""
-    if n_rows <= 2:
-        return fig.add_gridspec(n_rows, 1)
-    return fig.add_gridspec(n_rows, 1, top=0.945, bottom=0.035,
+    return fig.add_gridspec(n_rows, 1, top=0.90, bottom=0.12,
                             left=0.07, right=0.98, hspace=0.55)
 
 
@@ -1088,7 +1122,7 @@ def inspect_snipped_trial(feet, aligned, trial, session_tag='',
         raise ValueError(f'trial {trial}: no matched bouts in the aligned '
                          f'table - nothing to draw')
     fig = plt.figure(figsize=(12, 5.0 * len(rows)),
-                     constrained_layout=len(rows) <= 2)
+                     constrained_layout=False)
     outer = _inspect_layout(fig, len(rows))
     for k, (_, row) in enumerate(rows.iterrows()):
         axes5 = imu.make_bout_axes(fig, outer[k])
@@ -1209,8 +1243,7 @@ class _DraggableTrial:
         if res is None:
             blk['lines'] = {}
             return
-        t_end = (blk.get('i1_abs') or int(row['stop_s'] / self.period)
-                 ) - res['t0_abs']
+        t_end = res['end_abs'] - res['t0_abs']
         pos = {'snug': 0.0, 'end': t_end * self.period}
         color = {'snug': 'tab:green', 'end': 'tab:purple'}
         blk['lines'] = {name: [ax.axvline(pos[name], color=color[name], lw=2.0,
@@ -1418,7 +1451,7 @@ def interactive_inspect_trial(feet, aligned, trial, session_tag='',
     fig_h = 5.4 * len(rows) + 0.7
     with plt.ioff():
         fig = plt.figure(figsize=(12.5, fig_h))
-    outer = fig.add_gridspec(len(rows), 1, top=1 - 0.45 / fig_h,
+    outer = fig.add_gridspec(len(rows), 1, top=1 - 0.85 / fig_h,
                              bottom=1.25 / fig_h, left=0.07, right=0.98,
                              hspace=0.55)
     blocks = []

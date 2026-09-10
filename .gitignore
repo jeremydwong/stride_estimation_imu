@@ -55,3 +55,4 @@ figures/
 
 # Regenerable parameter-sweep cache (figures/metrics are retained for review).
 debug/track_foot_difference/trajectories.npz
+debug/brock_feedback/export/

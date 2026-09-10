@@ -1403,6 +1403,32 @@ def snug_start(left_info: 'FootTrajectory', right_info: 'FootTrajectory',
     return i, foot
 
 
+def snug_end(left_info: 'FootTrajectory', right_info: 'FootTrajectory',
+             high: float = DEFAULT_START_FOOTSPEED_HIGH,
+             low: float = DEFAULT_START_FOOTSPEED_LOW) -> Tuple[Optional[int], Optional[str]]:
+    """Reverse of snug_start: last committed swing, then its settling valley.
+
+    Returns an inclusive sample index and foot, or (None, None) when neither
+    foot reaches high. Follow the last high crossing forward until speed is
+    at/below low or rises again from a local minimum. It cannot recover a
+    landing outside the supplied recording window.
+    """
+    last = None
+    for foot, speed in (('left', left_info.Vm), ('right', right_info.Vm)):
+        crossings = np.flatnonzero(speed >= high)
+        if crossings.size and (last is None or crossings[-1] > last[0]):
+            last = (int(crossings[-1]), foot)
+    if last is None:
+        return None, None
+    i, foot = last
+    speed = left_info.Vm if foot == 'left' else right_info.Vm
+    while i < len(speed) - 1:
+        if speed[i] <= low or speed[i + 1] > speed[i]:
+            break
+        i += 1
+    return i, foot
+
+
 def _common_frame(left_info: 'FootTrajectory', right_info: 'FootTrajectory', period: float,
                   initial_separation: float = 0.3,
                   min_stride_displacement: float = 0.2,
