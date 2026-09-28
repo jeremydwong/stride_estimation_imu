@@ -1,8 +1,10 @@
 LICENSE
 README.md
 pyproject.toml
+src/brock_functions.py
 src/stride_imu/__init__.py
 src/stride_imu/apdm.py
+src/stride_imu/experimental.py
 src/stride_imu/inertial.py
 src/stride_imu/plotting.py
 src/stride_imu.egg-info/PKG-INFO
@@ -10,3 +12,7 @@ src/stride_imu.egg-info/SOURCES.txt
 src/stride_imu.egg-info/dependency_links.txt
 src/stride_imu.egg-info/requires.txt
 src/stride_imu.egg-info/top_level.txt
+tests/test_brock_feedback.py
+tests/test_experimental_track.py
+tests/test_omnibus.py
+tests/test_stride_gravity.py

@@ -929,6 +929,56 @@ def align_snips_to_trial_table(feet, snips, processed_trialtable, pad_seconds=1.
             'extra': measured.iloc[extra_idx]}
 
 
+def assign_walkers_by_protocol(feet, result, first_walker='a'):
+    """Fix walker assignment from the protocol's walking order.
+
+    align_snips_to_trial_table() names each bout's walker after the single
+    foot with the largest horizontal excursion. On short trials a STANDING
+    foot's integration drift can out-travel a real 2.5 m walk, so both bouts
+    of a trial-rep get pinned on one person (s07_s08: 20 trial-reps).
+
+    The protocol fixes the order instead: in rep 1 (the first pass through
+    the 48 trials) `first_walker` walks bout 1 and the other person bout 2;
+    rep 2 flips it. This relabels every MATCHED bout accordingly and takes
+    its distance from that person's farther-moving foot (the per-foot
+    distances already in result['measured'] - nothing is re-mechanized).
+    reaction_s / jumped_gun are recomputed, since they follow the walker's
+    feet. The snip-to-trial matching itself is NOT redone.
+
+    Returns a new result dict (the input is not modified) whose 'aligned'
+    table gains 'walker_auto' (the excursion-based label) and
+    'walker_changed' (True where the protocol disagreed). Missed bouts (no
+    snip) are left untouched.
+    """
+    if first_walker not in ('a', 'b'):
+        raise ValueError("first_walker must be 'a' or 'b'")
+    other = {'a': 'b', 'b': 'a'}[first_walker]
+    measured = result['measured']
+    aligned = result['aligned'].copy()
+    aligned['walker_auto'] = aligned['walker']
+    aligned['walker_changed'] = False
+    for i, row in aligned[aligned['snip'].notna()].iterrows():
+        person = first_walker if (row['rep'] == 1) == (row['bout'] == 1) else other
+        dists = {lab: measured.loc[int(row['snip']), f'dist_{lab}']
+                 for lab in (f'left_foot_{person}', f'right_foot_{person}')
+                 if f'dist_{lab}' in measured.columns}
+        if not dists:
+            continue                     # that person's feet aren't recorded
+        foot = max(dists, key=lambda k: -1 if np.isnan(dists[k]) else dists[k])
+        aligned.loc[i, 'walker_changed'] = (
+            str(row['walker']).rsplit('_', 1)[-1] != person)
+        aligned.loc[i, 'walker'] = foot
+        aligned.loc[i, 'measured_m'] = dists[foot]
+    aligned['distance_error_m'] = aligned['measured_m'] - aligned['distance_m']
+    aligned['reaction_s'] = estimate_reaction_s(feet, aligned)
+    aligned['jumped_gun'] = flag_jumped_gun(feet, aligned,
+                                            reaction_s=aligned['reaction_s'])
+    out = dict(result)
+    out['aligned'] = aligned
+    out['missed'] = aligned.loc[result['missed'].index]
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Per-trial visualization figures + manual inspection/rescoring for the
 # event-scored sessions.
@@ -956,7 +1006,8 @@ def _render_inspect_block(axes5, feet, pairs, row, period,
                           ymax=(imu.ACCEL_YMAX, imu.FOOTSPEED_YMAX,
                                 imu.STEPSPEED_YMAX),
                           initial_separation=0.2, anchor_mode='firstonly',
-                          i1_abs=None, snug_abs=None, i0_abs=None):
+                          i1_abs=None, snug_abs=None, i0_abs=None,
+                          context_s=None):
     """(Re)draw ONE bout block of the inspection figure onto `axes5`.
 
     Shared by inspect_snipped_trial() and the draggable interactive version.
@@ -975,7 +1026,18 @@ def _render_inspect_block(axes5, feet, pairs, row, period,
              f"{row['walker']} walks - expected {row['distance_m']:.1f} m, "
              f"measured {row['measured_m']:.1f} m"
              + (' [inferred stop]' if row.get('inferred') else ''))
-    axes5[0].set_title(title, loc='left', fontsize=10, fontweight='bold', pad=34)
+    # Anchor the title to the BLOCK top, not the equal-scale overhead's: for a
+    # short walk that panel shrinks vertically (aspect='equal') and its title
+    # sank mid-block, hidden under the wide overhead. x = narrow panel's left,
+    # y = wide panel's top (full height) + 34 pt. Owned by the wide panel, so
+    # a redraw's ax.clear() removes it.
+    import matplotlib.transforms as mtransforms
+    anchor = mtransforms.blended_transform_factory(axes5[0].transAxes,
+                                                   axes5[1].transAxes)
+    axes5[1].text(0, 1, title, fontsize=10, fontweight='bold', ha='left',
+                  va='bottom', clip_on=False,
+                  transform=anchor + mtransforms.ScaledTranslation(
+                      0, 34 / 72, axes5[1].figure.dpi_scale_trans))
     if (subject, 'left') not in pairs or (subject, 'right') not in pairs:
         axes5[2].text(0.5, 0.5, f'{subject}: foot IMU missing',
                       transform=axes5[2].transAxes, ha='center')
@@ -1000,20 +1062,36 @@ def _render_inspect_block(axes5, feet, pairs, row, period,
         ax_acc = axes5[2]
         t0_abs = res['t0_abs']            # absolute sample at t=0 (snug)
         j0 = res['slice'][0]              # first sample of the drawn slice
-        # grey pre-walk |A| context: from t0-prefix up to the slice start
-        # (the slice itself is already drawn in colour by draw_accel)
+        # grey CONTEXT outside the analysed slice (drawn in colour by
+        # draw_bout_block): `pre` s before t=0 and `post` s after the slice,
+        # raw |A| AND foot speed - the speed from one mechanization of the
+        # whole context window, so you can see where walking really starts
+        # and ends before dragging the bounds out there.
+        pre, post = context_s if context_s is not None else (prefix_seconds,
+                                                              prefix_seconds)
         suffix_ab = 'a' if subject == 's1' else 'b'
-        a_pre = max(0, t0_abs - int(prefix_seconds / period))
+        a_pre = max(0, t0_abs - int(pre / period))
         j1 = res['slice'][1]
-        b_post = min(len(next(iter(feet.values()))),
-                     j1 + int(prefix_seconds / period))
+        b_post = min(len(next(iter(feet.values()))), j1 + int(post / period))
+        ax_vel = axes5[3]
         for side in ('left', 'right'):
             rec = feet[f'{side}_foot_{suffix_ab}']
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    ctx = imu.compute_position(rec.Wb[a_pre:b_post],
+                                               rec.Ab[a_pre:b_post], period)
+            except Exception:                 # context is optional decoration
+                ctx = None
             for aa, bb in ((a_pre, j0), (j1, b_post)):   # before AND after
-                seg = rec.Ab[aa:bb]
+                if bb <= aa:
+                    continue
                 tt = (np.arange(aa, bb) - t0_abs) * period
-                ax_acc.plot(tt, np.linalg.norm(seg, axis=1), lw=0.5,
+                ax_acc.plot(tt, np.linalg.norm(rec.Ab[aa:bb], axis=1), lw=0.5,
                             color='0.6', alpha=0.8, zorder=1)
+                if ctx is not None:
+                    ax_vel.plot(tt, ctx.Vm[aa - a_pre:bb - a_pre], lw=0.6,
+                                color='0.6', alpha=0.8, zorder=1,
+                                ls='-' if side == 'left' else '--')
         # the button presses (the snip bounds), as vertical trigger lines
         for t_ev, color, lab in (((i0 - t0_abs) * period, '#1a7f37', 'Start press'),
                                  ((i1 - t0_abs) * period, '#666666', 'Stop press')):
@@ -1047,7 +1125,7 @@ def _render_inspect_block(axes5, feet, pairs, row, period,
                        else 'manual end'),
                     transform=ax_acc.transAxes, fontsize=8, va='bottom',
                     bbox=dict(fc='white', ec='0.8', alpha=0.8, pad=2))
-        ax_acc.set_xlim(left=min(-prefix_seconds,
+        ax_acc.set_xlim(left=min((a_pre - t0_abs) * period,
                                  (i0 - t0_abs) * period - 0.5),
                         right=(b_post - t0_abs) * period)
         return res
@@ -1058,25 +1136,120 @@ def _render_inspect_block(axes5, feet, pairs, row, period,
         return None
 
 
-def _inspect_layout(fig, n_rows):
-    """Gridspec for n stacked bout blocks (constrained_layout collapses >2)."""
-    return fig.add_gridspec(n_rows, 1, top=0.90, bottom=0.12,
-                            left=0.07, right=0.98, hspace=0.55)
+def _inspect_rows(aligned, trial, rep=None):
+    """The matched bouts of a trial (optionally one rep); ValueError if none."""
+    if rep is not None and (isinstance(rep, bool) or rep not in (1, 2)):
+        raise ValueError('rep must be 1 or 2')
+    rows = aligned[(aligned['trial'] == trial)].dropna(subset=['start_s',
+                                                               'stop_s'])
+    if rep is not None:
+        rows = rows[rows['rep'] == rep]
+    if not len(rows):
+        raise ValueError(f'trial {trial}'
+                         + (f', rep {rep}' if rep is not None else '')
+                         + ': no matched bouts in the aligned table - '
+                         'nothing to draw')
+    return rows
+
+
+def _build_inspect_figure(feet, aligned, trial, rep=None, session_tag='',
+                          prefix_seconds=None,
+                          ymax=(imu.ACCEL_YMAX, imu.FOOTSPEED_YMAX,
+                                imu.STEPSPEED_YMAX),
+                          initial_separation=0.2, anchor_mode='firstonly',
+                          pad_s=5.0, plot_every=1,
+                          interactive=False):
+    """THE inspection-figure layout, shared by the static and drag versions.
+
+    Per repetition: a foot-speed overview (_draw_foot_speed_overview) across
+    that rep's bouts, then one block per matched bout (_render_inspect_block).
+    `interactive=True` only changes presentation - a dpi that fits the
+    notebook column and a bottom strip for the save/close buttons - and the
+    caller adds the clickable parts. Returns (fig, blocks) with
+    blocks = [{'axes5', 'row', 'res', 'ov_ax', 'shade'}, ...] ('ov_ax' = its
+    rep's overview axes, 'shade' = the bout's span + label artists there);
+    raises ValueError when the
+    trial (rep) has no matched bouts.
+    """
+    import matplotlib.pyplot as plt
+    rows = _inspect_rows(aligned, trial, rep)
+    pairs = feet_pairs_from_labels(feet)
+    period = next(iter(feet.values())).period
+    # One SECTION per repetition (a trial's two reps are typically an hour
+    # apart, so a shared overview would be ~4000 s wide and useless): its
+    # foot-speed overview, then its bout blocks. Vertical budget [in]:
+    # title 0.5 | per section: overview ov_h, its x label + the first bout's
+    # hanging title (34 pt over its axes) 1.75, 5.4 per bout block | between
+    # sections / at the bottom: the last block's hanging legend (+ the button
+    # strip when interactive). Manual placement: constrained_layout collapses
+    # with >2 nested bout blocks.
+    ov_h, head_h, block_h, gap_h = 1.6, 1.75, 5.4, 1.6
+    ov_pad = 0.6          # above each overview: rep title + sample-index axis
+    bottom_in = 1.25 if interactive else 0.8
+    sections = [grp for _, grp in rows.groupby('rep', sort=True)]
+    fig_h = (0.5 + sum(ov_pad + ov_h + head_h + block_h * len(g)
+                       for g in sections)
+             + gap_h * (len(sections) - 1) + bottom_in)
+    if interactive:   # built hidden; the caller displays it explicitly
+        with plt.ioff():
+            fig = plt.figure(figsize=(12.5, fig_h), dpi=_interactive_dpi(12.5))
+    else:             # a normal figure: shows inline like any other
+        fig = plt.figure(figsize=(12.5, fig_h))
+    blocks, top = [], 0.5                    # inches from the figure top
+    for sec in sections:
+        top += ov_pad
+        ov_ax = fig.add_axes([0.07, 1 - (top + ov_h) / fig_h, 0.84,
+                              ov_h / fig_h])
+        _draw_foot_speed_overview(ov_ax, feet, sec, period,
+                                  pad_s=pad_s, every=plot_every)
+        ov_ax.set_title(f"rep {int(sec['rep'].iloc[0])}", loc='left',
+                        fontsize=9, fontweight='bold')
+        top += ov_h + head_h
+        bottom = top + block_h * len(sec)
+        outer = fig.add_gridspec(len(sec), 1, top=1 - top / fig_h,
+                                 bottom=1 - bottom / fig_h, left=0.07,
+                                 right=0.98, hspace=0.55)
+        for k, (_, row) in enumerate(sec.iterrows()):
+            axes5 = imu.make_bout_axes(fig, outer[k])
+            context = [pad_s if prefix_seconds is None else prefix_seconds,
+                       pad_s]
+            res = _render_inspect_block(axes5, feet, pairs, row, period,
+                                        context_s=context,
+                                        ymax=ymax,
+                                        initial_separation=initial_separation,
+                                        anchor_mode=anchor_mode)
+            _decimate_lines(axes5, plot_every)
+            shade = _shade_overview_bout(ov_ax, row, float(row['start_s']),
+                                         float(row['stop_s']))
+            blocks.append({'axes5': list(axes5), 'row': row, 'res': res,
+                           'ov_ax': ov_ax, 'shade': shade,
+                           'context': context})
+        top = bottom + gap_h
+    title = f'{session_tag} trial {int(trial)}'.strip()
+    if rep is not None:
+        title += f' rep {int(rep)}'
+    fig.suptitle(title, y=1 - 0.1 / fig_h, va='top')
+    return fig, blocks
 
 
 def inspect_snipped_trial(feet, aligned, trial, session_tag='',
-                          prefix_seconds=5.0, save_path=None,
+                          prefix_seconds=None, save_path=None,
                           ymax=(imu.ACCEL_YMAX, imu.FOOTSPEED_YMAX,
                                 imu.STEPSPEED_YMAX),
-                          initial_separation=0.2, anchor_mode='firstonly'):
+                          initial_separation=0.2, anchor_mode='firstonly',
+                          pad_s=5.0, plot_every=1, rep=None):
     """Draw the full inspection figure for ONE trial and return the Figure.
 
-    Every matched bout of the trial is stacked (up to 4 blocks: 2 reps x 2
-    walkers). Each block shows two overhead foot maps (equal-scale + wide) on
+    On top, a foot-speed OVERVIEW: every foot on one session-time axis from
+    `pad_s` before the first bout to `pad_s` after the last
+    (person A black, B green; right foot dashed), each bout's window shaded
+    - the quickest check that the snips sit on the actual walks. Below it,
+    every matched bout of the trial is stacked (up to 4 blocks: 2 reps x 2
+    walkers; `rep=1|2` shows one repetition). Each block shows two overhead foot maps (equal-scale + wide) on
     the left and raw |A| / foot speed / step speed on the right, plus:
 
-      * `prefix_seconds` of the raw accelerometer BEFORE the walk, in grey —
-        what was happening just before/around the button press;
+      * `pad_s` of grey CONTEXT before and after the analysed walk - raw |A|
+        and foot speed - what was happening around the button presses;
       * the Start/Stop button presses as vertical lines (green/purple);
       * the approximate REACTION time (Start press -> snug gait start, i.e.
         t=0) and the bout DURATION (t=0 -> Stop press), written on the plot.
@@ -1099,11 +1272,18 @@ def inspect_snipped_trial(feet, aligned, trial, session_tag='',
         inferred from the feet rather than clicked).
     trial : int
         Trial number (the trial table's 1..48).
-    prefix_seconds : float
-        How much grey pre-walk accelerometer context to draw before t=0.
+    prefix_seconds : float or None
+        Override for the grey context BEFORE t=0 only (None = `pad_s`).
     save_path : str or None
         When given, the figure is also written to this file (format from the
         extension). None = just build it.
+    pad_s : float
+        Seconds of context: the overview spans pad_s before the first / after
+        the last bout, and each bout block shows pad_s of grey context on
+        both sides.
+    plot_every : int
+        Plot only every N-th sample (smaller/faster figures; plotting only -
+        all computation stays full-rate). 1 = every sample.
 
     Returns
     -------
@@ -1112,26 +1292,11 @@ def inspect_snipped_trial(feet, aligned, trial, session_tag='',
     For a version where you can DRAG the gait start and bout end, see
     interactive_inspect_trial().
     """
-    import matplotlib.pyplot as plt
-
-    pairs = feet_pairs_from_labels(feet)
-    period = next(iter(feet.values())).period
-    rows = aligned[(aligned['trial'] == trial)].dropna(subset=['start_s',
-                                                               'stop_s'])
-    if not len(rows):
-        raise ValueError(f'trial {trial}: no matched bouts in the aligned '
-                         f'table - nothing to draw')
-    fig = plt.figure(figsize=(12, 5.0 * len(rows)),
-                     constrained_layout=False)
-    outer = _inspect_layout(fig, len(rows))
-    for k, (_, row) in enumerate(rows.iterrows()):
-        axes5 = imu.make_bout_axes(fig, outer[k])
-        _render_inspect_block(axes5, feet, pairs, row, period,
-                              prefix_seconds=prefix_seconds, ymax=ymax,
-                              initial_separation=initial_separation,
-                              anchor_mode=anchor_mode)
-    fig.suptitle(f'{session_tag} trial {int(trial)}' if session_tag
-                 else f'trial {int(trial)}')
+    fig, _ = _build_inspect_figure(
+        feet, aligned, trial, rep=rep, session_tag=session_tag,
+        prefix_seconds=prefix_seconds, ymax=ymax,
+        initial_separation=initial_separation, anchor_mode=anchor_mode,
+        pad_s=pad_s, plot_every=plot_every)
     if save_path is not None:
         fig.savefig(save_path)
     return fig
@@ -1141,16 +1306,20 @@ def save_trial_figures(feet, aligned, session_tag, out_dir=None,
                        suffix='viz', trials=None, fmt='svg',
                        ymax=(imu.ACCEL_YMAX, imu.FOOTSPEED_YMAX,
                              imu.STEPSPEED_YMAX), initial_separation=0.2,
-                       anchor_mode='firstonly'):
-    """Batch wrapper: inspect_snipped_trial() for every trial, saved to disk.
+                       anchor_mode='firstonly', pad_s=5.0,
+                       plot_every=1):
+    """Batch wrapper: inspect_snipped_trial() per trial REPETITION, to disk.
 
-    Writes <out_dir>/<session_tag>/brock_<session_tag>_trial<N>_<suffix>.<fmt>
-    (folder created as necessary) and returns the list of paths. `out_dir`
+    One file per (trial, rep) - each rep's foot-speed overview plus its bout
+    blocks (the two reps of a trial are usually far apart in time):
+    <out_dir>/<session_tag>/brock_<session_tag>_trial<N>_rep<R>_<suffix>.<fmt>
+    (folder created as necessary). Returns the list of paths. `out_dir`
     defaults to the 'figures' folder NEXT TO THE SESSION'S .h5 (taken from the
     recordings' file_path) — with the data in Dropbox that is the same
     '<imu data>/figures' the dataset-1 batch writes to, and it keeps generated
-    figures out of the git repo. `trials=None` draws every trial in `aligned`
-    (a trial with no matched bouts is skipped).
+    figures out of the git repo. `trials=None` draws every trial-rep in
+    `aligned`; otherwise a list of trial numbers (both reps) and/or
+    (trial, rep) pairs. A rep with no matched bouts is skipped.
 
     `feet` and `aligned` are exactly as for inspect_snipped_trial(): the
     label-keyed dict of both subjects' foot recordings from
@@ -1168,25 +1337,187 @@ def save_trial_figures(feet, aligned, session_tag, out_dir=None,
 
     folder = os.path.join(out_dir, session_tag)
     os.makedirs(folder, exist_ok=True)
-    want = set(trials) if trials is not None else None
+    want = None
+    if trials is not None:
+        want = set()
+        for item in trials:
+            if isinstance(item, (tuple, list)):
+                want.add((int(item[0]), int(item[1])))
+            else:
+                want.update({(int(item), 1), (int(item), 2)})
+    pairs = aligned[['trial', 'rep']].drop_duplicates().astype(int)
     paths = []
-    for trial in aligned['trial'].unique():
-        if want is not None and trial not in want:
+    for trial, rep in pairs.itertuples(index=False):
+        if want is not None and (trial, rep) not in want:
             continue
-        path = os.path.join(
-            folder, f'brock_{session_tag}_trial{int(trial)}_{suffix}.{fmt}')
+        path = os.path.join(folder, f'brock_{session_tag}_trial{trial}_rep'
+                                    f'{rep}_{suffix}.{fmt}')
         try:
             fig = inspect_snipped_trial(
-                feet, aligned, int(trial), session_tag=session_tag,
+                feet, aligned, trial, rep=rep, session_tag=session_tag,
                 save_path=path, ymax=ymax,
-                initial_separation=initial_separation, anchor_mode=anchor_mode)
+                initial_separation=initial_separation, anchor_mode=anchor_mode,
+                pad_s=pad_s, plot_every=plot_every)
         except ValueError:
-            continue                      # no matched bouts for this trial
+            continue                      # no matched bouts for this rep
         plt.close(fig)
         paths.append(path)
         if len(paths) % 10 == 0:
-            print(f'  ... {len(paths)} trial figures written')
+            print(f'  ... {len(paths)} trial-rep figures written')
     return paths
+
+
+def save_manual_windows(csv_path, records):
+    """Upsert edits by trial/rep/person; preserve other windows, atomically.
+
+    Both editors use this shared file format. Existing append-only histories
+    are collapsed to their latest entries on the next save.
+    """
+    import tempfile
+    columns = ['trial', 'rep', 'person', 'start_s', 'stop_s']
+    updates = pd.DataFrame(records, columns=columns)
+    if updates.empty:
+        return
+    if not (updates['person'].isin(['a', 'b']).all()
+            and updates['rep'].isin([1, 2]).all()
+            and np.isfinite(updates[['start_s', 'stop_s']].to_numpy(float)).all()
+            and (updates.start_s >= 0).all()
+            and (updates.stop_s > updates.start_s).all()):
+        raise ValueError('Manual windows require person a/b, rep 1/2, and 0 <= start < stop')
+    old = pd.read_csv(csv_path) if os.path.exists(csv_path) else pd.DataFrame(columns=columns)
+    merged = (pd.concat([old, updates], ignore_index=True) if len(old) else updates
+              ).drop_duplicates(['trial', 'rep', 'person'], keep='last'
+              ).sort_values(['trial', 'rep', 'person'])
+    folder = os.path.dirname(os.path.abspath(csv_path))
+    os.makedirs(folder, exist_ok=True)
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', dir=folder, suffix='.csv', delete=False) as f:
+            tmp = f.name
+            merged.to_csv(f, index=False)
+        os.replace(tmp, csv_path)
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def _run_on_save(controller):
+    """Call the editor's on_save hook (set by ManualScoring); return a note.
+
+    Runs inside a widget callback, where a raised exception would vanish into
+    the browser log - so failures are reported on the figure's status line.
+    """
+    hook = getattr(controller, 'on_save', None)
+    if hook is None:
+        return ''
+    try:
+        return hook(controller.trial) or ''
+    except Exception as e:                      # noqa: BLE001 - shown to user
+        return f' - BUT updating the corrected table failed: {e!r}'
+
+
+def _save_controller_rows(controller, records):
+    # Do not replay unchanged editor state over a newer save from another editor.
+    previous = getattr(controller, '_saved_windows', {})
+    pending = [r for r in records if previous.get((r['trial'], r['rep'], r['person']))
+               != (r['start_s'], r['stop_s'])]
+    if getattr(controller, '_discarded', False) or not pending:
+        return False
+    save_manual_windows(controller.out_csv, pending)
+    controller._saved_windows = dict(previous)
+    for r in pending:
+        controller._saved_windows[(r['trial'], r['rep'], r['person'])] = (r['start_s'], r['stop_s'])
+    return True
+
+
+def _decimate_lines(axes, every):
+    """Plot-only downsampling: keep every `every`-th point of long lines.
+
+    Speeds up ipympl redraws. Only dense traces are thinned (> 200 points,
+    no markers), so step dots, vertical press/drag lines and legends are
+    untouched. The underlying data and every computation stay full-rate.
+    """
+    if not every or every <= 1:
+        return
+    for ax in axes:
+        for a in [ax] + list(getattr(ax, 'child_axes', [])):
+            for ln in a.lines:
+                x, y = ln.get_xdata(), ln.get_ydata()
+                if len(x) > 200 and ln.get_marker() in (None, '', 'None'):
+                    ln.set_data(x[::every], y[::every])
+
+
+OVERVIEW_COLOR = {'a': 'black', 'b': 'tab:green'}   # person 1 / person 2
+
+
+def _bout_window_s(row, st, period):
+    """(start_s, stop_s) of a bout, with any drag adjustments applied."""
+    start = st['snug_abs'] * period if 'snug_abs' in st else float(row['start_s'])
+    stop = st['i1_abs'] * period if 'i1_abs' in st else float(row['stop_s'])
+    return start, stop
+
+
+def _shade_overview_bout(ax, row, start_s, stop_s):
+    """Shade + label one bout's window on the overview; returns the artists."""
+    person = str(row['walker'])[-1]
+    color = OVERVIEW_COLOR.get(person, '0.5')
+    arts = [ax.axvspan(start_s, stop_s, color=color, alpha=0.10, lw=0),
+            ax.text(start_s, 0.98,
+                    f" r{int(row['rep'])} b{int(row['bout'])} "
+                    f"({person.upper()})",
+                    transform=ax.get_xaxis_transform(), va='top',
+                    fontsize=7, color=color)]
+    return arts
+
+
+def _draw_foot_speed_overview(ax, feet, rows, period, pad_s=5.0, every=1):
+    """Every foot's speed across all shown bouts, on one session-time axis.
+
+    Spans pad_s before the first bout start to pad_s after the last bout end.
+    Person a (s1) black, person b (s2) green; left foot solid, right dashed.
+    Foot speed is heading-agnostic, so both walkers compare directly. Each
+    foot is mechanized over the whole window (ZUPT keeps stance at ~0).
+    Returns the window (lo_s, hi_s).
+    """
+    n_samples = min(len(rec) for rec in feet.values())
+    lo = max(0.0, float(rows['start_s'].min()) - pad_s)
+    hi = min(n_samples * period, float(rows['stop_s'].max()) + pad_s)
+    j0, j1 = int(lo / period), int(hi / period)
+    t = np.arange(j0, j1) * period
+    step = max(1, int(every or 1))
+    for label, rec in sorted(feet.items()):
+        person = label.rsplit('_', 1)[-1]
+        ls = '-' if label.startswith('left') else '--'
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                traj = imu.compute_position(rec.Wb[j0:j1], rec.Ab[j0:j1],
+                                            period)
+        except Exception as e:                  # noqa: BLE001 - shown on plot
+            ax.text(0.01, 0.85, f'{label}: mechanization failed ({e})',
+                    transform=ax.transAxes, fontsize=7)
+            continue
+        ax.plot(t[::step], traj.Vm[::step], lw=0.7, ls=ls,
+                color=OVERVIEW_COLOR.get(person, '0.5'),
+                label=label.replace('_foot', ''))
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(0, imu.FOOTSPEED_YMAX)
+    ax.set_ylabel('foot speed [m/s]')
+    ax.set_xlabel('session time [s]', labelpad=1)
+    ax.grid(alpha=0.3)
+    # second time base on top: absolute sample index (session time / period)
+    import matplotlib.ticker as mticker
+    secax = ax.secondary_xaxis('top', functions=(lambda x: x / period,
+                                                 lambda n: n * period))
+    secax.set_xlabel('absolute sample index', fontsize=8, labelpad=2)
+    secax.xaxis.set_major_locator(mticker.MaxNLocator(nbins=6, integer=True))
+    secax.xaxis.set_major_formatter(mticker.FuncFormatter(
+        lambda v, _: f'{v:.0f}'))
+    secax.tick_params(labelsize=8)
+    # legend outside on the right: the top belongs to the sample axis, and
+    # inside it would cover the bout labels
+    ax.legend(fontsize=7, loc='center left', bbox_to_anchor=(1.005, 0.5),
+              frameon=False, borderaxespad=0)
+    return lo, hi
 
 
 class _DraggableTrial:
@@ -1202,6 +1533,9 @@ class _DraggableTrial:
     (absolute sample indices), printed to the status line as you go.
     """
     GRAB = ('snug', 'end')
+    on_save = None    # ManualScoring hook: called with the trial after a save
+    plot_every = 1    # plot-only downsampling (see _decimate_lines)
+    extend_s = 5.0    # double-click: widen that side of a block's view by this
 
     def __init__(self, fig, feet, pairs, period, blocks, prefix_seconds,
                  ymax, initial_separation, anchor_mode, trial, out_csv,
@@ -1216,15 +1550,16 @@ class _DraggableTrial:
         self.state = {}               # (rep, bout) -> {'snug_abs', 'i1_abs'}
         self.drag = None              # (block_idx, 'snug'|'end') while held
         self.status = fig.text(0.01, 0.002, 'drag the green (gait start) or '
-                               'purple (bout end) line; release to recompute',
+                               'purple (bout end) line; release to recompute. '
+                               'Double-click left/right to see more time.',
                                fontsize=9, color='tab:red')
         from matplotlib.widgets import Button
         h = 0.30 / fig.get_figheight()          # button strip: fixed ~0.3 inch
         y = 0.10 / fig.get_figheight()
         self._buttons = []
         for x, w, label, cb in ((0.60, 0.185, 'save adjustments', self.save),
-                                (0.80, 0.185, 'close without saving',
-                                 self.close)):
+                                (0.80, 0.185, 'continue without saving',
+                                 self.discard)):
             bax = fig.add_axes([x, y, w, h])
             btn = Button(bax, label)
             btn.label.set_fontsize(8)
@@ -1257,7 +1592,7 @@ class _DraggableTrial:
         st = self.state.get(rep_bout, {})
         res = _render_inspect_block(
             blk['axes5'], self.feet, self.pairs, blk['row'], self.period,
-            prefix_seconds=self.prefix_seconds, ymax=self.ymax,
+            context_s=blk['context'], ymax=self.ymax,
             initial_separation=self.initial_separation,
             anchor_mode=self.anchor_mode,
             i1_abs=st.get('i1_abs'), snug_abs=st.get('snug_abs'),
@@ -1265,7 +1600,39 @@ class _DraggableTrial:
         blk['res'] = res
         blk['i1_abs'] = st.get('i1_abs')
         self._add_lines(blk)
+        _decimate_lines(blk['axes5'], self.plot_every)
+        self._shade_overview(blk)
         self.fig.canvas.draw_idle()
+
+    def _extend_view(self, bi, event):
+        """Double-click: show `extend_s` more context on the clicked side.
+
+        Left of the view's centre widens the pre-walk side, right of it the
+        post-walk side. View only - the bout's bounds are unchanged (drag a
+        line into the new stretch to move them; dragging the gait start
+        before the analysed slice re-cuts the bout from there).
+        """
+        blk = self.blocks[bi]
+        lo, hi = event.inaxes.get_xlim()
+        side = 0 if event.xdata < (lo + hi) / 2 else 1
+        blk['context'][side] += self.extend_s
+        where = 'before' if side == 0 else 'after'
+        self._say(f'showing {blk["context"][side]:g} s {where} - redrawing...')
+        self._redraw_block(bi)
+        self._say(f'now showing {blk["context"][0]:g} s before / '
+                  f'{blk["context"][1]:g} s after (view only; drag a line '
+                  f'to change the bout)')
+
+    def _shade_overview(self, blk):
+        """(Re)shade one bout's current window on its rep's overview."""
+        if blk.get('ov_ax') is None:
+            return
+        row = blk['row']
+        key = (int(row['rep']), int(row['bout']))
+        for art in blk.get('shade', []):
+            art.remove()
+        start, stop = _bout_window_s(row, self.state.get(key, {}), self.period)
+        blk['shade'] = _shade_overview_bout(blk['ov_ax'], row, start, stop)
 
     def _say(self, msg):
         self.status.set_text(msg)
@@ -1281,16 +1648,25 @@ class _DraggableTrial:
     def _on_press(self, event):
         if event.button != 1 or event.inaxes is None or event.xdata is None:
             return
+        if getattr(self, '_discarded', False):
+            return                          # 'continue without saving' froze it
         if getattr(self.fig.canvas.toolbar, 'mode', ''):
             self._say('zoom/pan tool is active - turn it off to drag')
             return
         bi = self._find_block(event.inaxes)
-        if bi is None or not self.blocks[bi]['lines']:
+        if bi is None:
+            return
+        if event.dblclick:
+            self.drag = None
+            self._extend_view(bi, event)
+            return
+        if not self.blocks[bi]['lines']:
             return
         lines = self.blocks[bi]['lines']
         name = min(self.GRAB,
                    key=lambda n: abs(lines[n][0].get_xdata()[0] - event.xdata))
         self.drag = (bi, name)
+        self._drag_from = lines[name][0].get_xdata()[0]
         self._say(f'dragging the {"gait start" if name == "snug" else "bout end"}'
                   f' - release to recompute')
 
@@ -1309,6 +1685,11 @@ class _DraggableTrial:
         self.drag = None
         blk = self.blocks[bi]
         x = blk['lines'][name][0].get_xdata()[0]
+        if abs(x - getattr(self, '_drag_from', np.nan)) < 1e-9:
+            self._say('drag the green (gait start) or purple (bout end) line; '
+                      'double-click left/right of centre to see '
+                      f'{self.extend_s:g} s more on that side')
+            return                         # a plain click is not an adjustment
         res, row = blk['res'], blk['row']
         t0_abs = res['t0_abs']
         rep_bout = (int(row['rep']), int(row['bout']))
@@ -1338,12 +1719,22 @@ class _DraggableTrial:
         self._redraw_block(bi)
         res = self.blocks[bi]['res']
         n = len(res['steps']['time']) if res is not None else 0
+        snapped = ''
+        if (name == 'snug' and res is not None
+                and res['t0_abs'] != st.get('snug_abs')):
+            # dropped in standing time: the pipeline starts the gait where
+            # walking actually begins - save what is SHOWN, not the drop point
+            snapped = (f' Gait start snapped '
+                       f'{(res["t0_abs"] - st["snug_abs"]) * self.period:+.2f} s'
+                       f' to the walking onset.')
+            st['snug_abs'] = int(res['t0_abs'])
+            self._shade_overview(self.blocks[bi])
         self._say(f'rep {rep_bout[0]} bout {rep_bout[1]} recomputed: {n} steps.'
-                  f" Press 'save adjustments' to append to {self.out_csv}"
+                  f'{snapped} Press \'save adjustments\' to save'
                   f' (original clicks stay untouched in the aligned table)')
 
     def save(self, _event=None):
-        """Append every adjusted bout to the manual-rescore CSV.
+        """Save adjusted bouts, replacing existing trial/rep/person entries.
 
         Writes the same (trial, rep, person, start_s, stop_s) rows that
         manual_correct() saves, so the notebook's apply_manual_rescore cell
@@ -1351,6 +1742,10 @@ class _DraggableTrial:
         original button-press bounds are NEVER modified — they stay in the
         aligned table / the .h5 annotations; this only records the edit.
         """
+        if getattr(self, '_discarded', False):
+            self._say('edits were discarded (continue without saving) - '
+                      'nothing saved; reopen the trial to rescore it')
+            return
         if not self.state:
             self._say('nothing adjusted yet - drag a line first')
             return
@@ -1369,40 +1764,68 @@ class _DraggableTrial:
             recs.append({'trial': self.trial, 'rep': rep_bout[0],
                          'person': person, 'start_s': round(start_s, 3),
                          'stop_s': round(stop_s, 3)})
-        df = pd.DataFrame(recs)
-        header = not os.path.exists(self.out_csv)
-        df.to_csv(self.out_csv, mode='a', header=header, index=False)
+        if not _save_controller_rows(self, recs):
+            self._say('No new changes to save.')
+            return
+        if self.on_save is not None:
+            self._say(f'saved {len(recs)} adjusted bout(s) to '
+                      f'{os.path.basename(self.out_csv)}{_run_on_save(self)}')
+            return
         fig_note = ''
         src_file = next(iter(self.feet.values())).file_path
         if src_file:   # adjusted figure beside the batch ones, _manual suffix
             folder = os.path.join(os.path.dirname(os.path.abspath(src_file)),
                                   'figures', self.session_tag)
             os.makedirs(folder, exist_ok=True)
+            reps = sorted({int(b['row']['rep']) for b in self.blocks})
+            tag = f'_rep{reps[0]}' if len(reps) == 1 else ''
             fpath = os.path.join(folder, f'brock_{self.session_tag}_trial'
-                                         f'{self.trial}_viz_manual.svg')
+                                         f'{self.trial}{tag}_viz_manual.svg')
             self.fig.savefig(fpath)
             fig_note = f' + {os.path.basename(fpath)}'
         self._say(f'saved {len(recs)} adjusted bout(s) to {self.out_csv}'
                   f'{fig_note} - run the apply_manual_rescore cell to fold in')
 
-    def close(self, _event=None):
-        """Discard: close the figure without writing anything."""
-        import matplotlib.pyplot as plt
-        try:
-            self.fig.canvas.close()   # ipympl: destroys the widget view;
-        except Exception:             # plt.close alone can leave it visible
-            pass                      # when called from inside a callback
-        plt.close(self.fig)
+    def discard(self, _event=None):
+        """'continue without saving': drop this figure's edits, write nothing.
+
+        The figure stays on screen (closing an ipympl view from inside its
+        own callback is unreliable across browsers); it is frozen instead -
+        further drags are ignored and saving is refused - and the next rerun
+        of a scoring cell (or H) closes it without saving.
+        """
+        self._discarded = True
+        self.drag = None
+        self._say('edits discarded - nothing will be saved from this figure. '
+                  'Carry on: rerun a scoring cell for the next trial.')
+
+    close = discard   # historical name
 
 
 def interactive_inspect_trial(feet, aligned, trial, session_tag='',
                               out_csv='brock_manual_rescore.csv',
-                              prefix_seconds=5.0,
+                              prefix_seconds=None,
                               ymax=(imu.ACCEL_YMAX, imu.FOOTSPEED_YMAX,
                                     imu.STEPSPEED_YMAX),
                               initial_separation=0.2,
-                              anchor_mode='firstonly'):
+                              anchor_mode='firstonly', rep=None,
+                              pad_s=5.0, plot_every=1):
     """inspect_snipped_trial(), but with DRAGGABLE gait start and bout end.
+
+    A foot-speed OVERVIEW sits above the bout blocks: every foot on one
+    session-time axis from `pad_s` before the first shown bout to
+    `pad_s` after the last (person A black, B green; right foot
+    dashed), each bout's current window shaded - so you see where in time
+    both people's bouts fall. Each bout block also shows `pad_s` of grey
+    context (raw |A| and foot speed) on both sides of the analysed walk;
+    DOUBLE-CLICK a block's time axes left or right of centre to see
+    `extend_s` (5 s) more on that side - view only, then drag a line out
+    there to move the bout. A click that doesn't move a line changes
+    nothing. `plot_every=N` plots only every N-th sample (faster redraws;
+    plotting only - all computation stays full-rate).
+
+    Pass rep=1 or rep=2 to display only that repetition. Omitting rep keeps
+    the historical all-repetitions behavior for existing callers.
 
     Every bout block gets two grab-able vertical lines on its time axes: the
     green line is the SNUG gait start (t=0) and the purple line the BOUT END
@@ -1415,14 +1838,14 @@ def interactive_inspect_trial(feet, aligned, trial, session_tag='',
     .state[(rep, bout)] = {'snug_abs': ..., 'i1_abs': ...}.
 
     Saving: the ORIGINAL button-press bounds are never modified. Press the
-    'save adjustments' button (bottom strip) to append the adjusted bouts to
+    'save adjustments' button (bottom strip) to update the adjusted bouts in
     `out_csv` — the same (trial, rep, person, start_s, stop_s) file that
     manual_correct() writes, so the notebook's apply_manual_rescore cell
     folds them into the aligned table identically, stamping each row
     manual=True with the person. No need to catch a return value for the
     edits (the figure lives on after this function returns; the CSV is the
-    hand-off). 'close without saving' discards everything and closes the
-    figure.
+    hand-off). 'continue without saving' discards this figure's edits (nothing
+    is written; the figure is frozen and closes on the next scoring-cell rerun).
 
     `feet` and `aligned` are as for inspect_snipped_trial() (the dict of both
     subjects' foot recordings from load_available_feet(), and the per-bout
@@ -1430,50 +1853,81 @@ def interactive_inspect_trial(feet, aligned, trial, session_tag='',
 
     Needs an interactive matplotlib backend — run it in Jupyter (browser) or
     from the terminal; ensure_interactive_backend() raises setup instructions
-    if the environment can't do it. KEEP THE RETURN VALUE in a variable
-    (`ctrl = interactive_inspect_trial(...)`) or the callbacks are garbage-
-    collected and dragging stops working.
+    if the Python backend cannot load. The figure retains its controller;
+    the return value also lets you inspect pending edits.
     """
-    mode = ensure_interactive_backend()
     import matplotlib.pyplot as plt
-
+    _inspect_rows(aligned, trial, rep)   # nothing to draw -> raise BEFORE
+    mode = ensure_interactive_backend()  # switching backend; figure after it
+    fig, blocks = _build_inspect_figure(
+        feet, aligned, trial, rep=rep, session_tag=session_tag,
+        prefix_seconds=prefix_seconds, ymax=ymax,
+        initial_separation=initial_separation, anchor_mode=anchor_mode,
+        pad_s=pad_s, plot_every=plot_every,
+        interactive=True)
     pairs = feet_pairs_from_labels(feet)
     period = next(iter(feet.values())).period
-    rows = aligned[(aligned['trial'] == trial)].dropna(subset=['start_s',
-                                                               'stop_s'])
-    if not len(rows):
-        raise ValueError(f'trial {trial}: no matched bouts in the aligned '
-                         f'table - nothing to draw')
-    # a bit taller than the static figure, with a reserved bottom strip for
-    # the save/close buttons (below the last block's hanging legend). Built
-    # under ioff() and displayed EXPLICITLY below: relying on ipympl's
-    # auto-show made a second call in one session silently not render.
-    fig_h = 5.4 * len(rows) + 0.7
-    with plt.ioff():
-        fig = plt.figure(figsize=(12.5, fig_h))
-    outer = fig.add_gridspec(len(rows), 1, top=1 - 0.85 / fig_h,
-                             bottom=1.25 / fig_h, left=0.07, right=0.98,
-                             hspace=0.55)
-    blocks = []
-    for k, (_, row) in enumerate(rows.iterrows()):
-        axes5 = imu.make_bout_axes(fig, outer[k])
-        res = _render_inspect_block(axes5, feet, pairs, row, period,
-                                    prefix_seconds=prefix_seconds, ymax=ymax,
-                                    initial_separation=initial_separation,
-                                    anchor_mode=anchor_mode)
-        blocks.append({'axes5': list(axes5), 'row': row, 'res': res})
-    fig.suptitle(f'{session_tag} trial {int(trial)}' if session_tag
-                 else f'trial {int(trial)}')
     ctrl = _DraggableTrial(fig, feet, pairs, period, blocks, prefix_seconds,
                            ymax, initial_separation, anchor_mode,
                            trial=int(trial), out_csv=out_csv,
                            session_tag=session_tag)
+    ctrl.plot_every = plot_every
+    # Matplotlib callbacks use weak references; the figure owns its editor.
+    fig._rescore_controller = ctrl
     if mode == 'script':
         plt.show(block=True)
     else:
-        from IPython.display import display
-        display(fig.canvas)
+        _display_interactive_figure(fig)
     return ctrl
+
+
+INTERACTIVE_MAX_WIDTH_PX = 860   # fits JupyterLab with the file browser open
+
+
+def _interactive_dpi(width_in):
+    """dpi at which a `width_in`-wide figure fits the notebook output column.
+
+    A 12.5 in figure at 100 dpi is 1250 px - wider than JupyterLab's output
+    area on most screens, hiding the right-hand time panels (and the drag
+    lines) behind a horizontal scrollbar. A lower dpi shrinks everything
+    proportionally. Pass it when CREATING the figure: changing the dpi of an
+    ipympl figure afterwards sends a resize before the view exists, and the
+    figure can come up blank.
+    """
+    import matplotlib
+    return min(matplotlib.rcParams['figure.dpi'],
+               INTERACTIVE_MAX_WIDTH_PX / width_in)
+
+
+def display_interactive_figure(fig):
+    """Show an ipympl figure so it renders completely on first appearance.
+
+    ipympl sends one full PNG, then only DIFF frames (changed pixels). The
+    browser view clears its canvas when it initializes/resizes - which can
+    happen after the kernel has already sent a frame (the kernel is often
+    still busy running the rest of the cell) - and diffs painted onto that
+    cleared canvas leave everything unchanged blank: a half-drawn figure
+    that fills in only where you click. So every frame is sent FULL until
+    the first mouse press in the figure; after that the view is settled and
+    diffs are safe (and keep dragging responsive).
+    """
+    from IPython.display import display
+    canvas = fig.canvas
+    if hasattr(canvas, '_force_full'):          # ipympl / webagg canvas
+        def _full(_event):
+            canvas._force_full = True           # read right after the draw
+        cids = [canvas.mpl_connect('draw_event', _full)]
+
+        def _settled(_event):
+            for cid in cids:
+                canvas.mpl_disconnect(cid)
+        cids.append(canvas.mpl_connect('button_press_event', _settled))
+    canvas.draw()
+    display(canvas)
+    canvas.draw_idle()
+
+
+_display_interactive_figure = display_interactive_figure
 
 
 INTERACTIVE_HELP = """\
@@ -1506,8 +1960,8 @@ def ensure_interactive_backend():
 
     Returns 'notebook' (Jupyter + ipympl widget backend) or 'script' (a GUI
     backend under plain `python`). Raises RuntimeError with INTERACTIVE_HELP
-    when interactivity cannot be achieved, BEFORE any figure is built, so the
-    caller never crashes halfway through a rescoring session.
+    when the Python backend cannot be enabled, before building a figure.
+    This cannot verify the browser widget connection; use the notebook check.
     """
     import matplotlib
     try:
@@ -1522,8 +1976,8 @@ def ensure_interactive_backend():
             ip.run_line_magic('matplotlib', 'widget')
             return 'notebook'
         except Exception as e:
-            venv = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                '.venv')
+            venv = os.path.join(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__))), '.venv')
             venv_py = os.path.join(venv, 'bin', 'python')
             on_venv = os.path.abspath(sys.prefix) == os.path.abspath(venv)
             diagnosis = (
@@ -1561,14 +2015,16 @@ class _RescoreFigure:
     pressing Enter in either re-slices, re-runs the mechanization, redraws.
     """
     SUBJECT_COLOR = {'a': 'tab:blue', 'b': 'tab:orange'}
+    on_save = None    # ManualScoring hook: called with the trial after a save
 
     def __init__(self, fig, axes, trial, rep, rows, out_csv, session_tag,
-                 feet, period, n_samples, window):
+                 feet, period, n_samples, window, plot_every=1):
         self.fig, self.axes = fig, axes
         self.trial, self.rep = trial, rep
         self.rows = rows                       # person -> (start_s, stop_s) or None
         self.out_csv, self.session_tag = out_csv, session_tag
         self.feet, self.period, self.n_samples = feet, period, n_samples
+        self.plot_every = max(1, int(plot_every or 1))   # plotting only
         self.pending = None                    # (person, [first_click_or_None])
         self.new = {}                          # person -> [start_s, stop_s]
         self.spans = {}
@@ -1596,6 +2052,7 @@ class _RescoreFigure:
             return
         self.window = (j0 * self.period, j1 * self.period)
         t = np.arange(j0, j1) * self.period
+        k = self.plot_every                    # plot-only downsampling
         for ax in self.axes:
             ax.clear()
         self.spans = {}                        # cleared with the axes
@@ -1603,15 +2060,17 @@ class _RescoreFigure:
             person = label.rsplit('_', 1)[-1]
             color = self.SUBJECT_COLOR.get(person, '0.5')
             ls = '-' if label.startswith('left') else '--'
-            self.axes[0].plot(t, np.linalg.norm(rec.Ab[j0:j1], axis=1),
+            self.axes[0].plot(t[::k], np.linalg.norm(rec.Ab[j0:j1:k], axis=1),
                               lw=0.5, color=color, ls=ls, label=label)
             try:
                 with contextlib.redirect_stdout(io.StringIO()):
                     traj = imu.compute_position(rec.Wb[j0:j1], rec.Ab[j0:j1],
                                                 self.period)
-                self.axes[1].plot(t, traj.Vm, lw=0.8, color=color, ls=ls)
+                self.axes[1].plot(t[::k], traj.Vm[::k], lw=0.8, color=color,
+                                  ls=ls)
                 self.axes[2].plot(
-                    t, np.linalg.norm(traj.P[:, :2] - traj.P[0, :2], axis=1),
+                    t[::k], np.linalg.norm(traj.P[::k, :2] - traj.P[0, :2],
+                                           axis=1),
                     lw=0.8, color=color, ls=ls)
             except Exception as e:
                 self.axes[1].text(0.01, 0.9,
@@ -1708,14 +2167,15 @@ class _RescoreFigure:
         recs = [{'trial': self.trial, 'rep': self.rep, 'person': person,
                  'start_s': round(win[0], 3), 'stop_s': round(win[1], 3)}
                 for person, win in sorted(self.new.items())]
-        df = pd.DataFrame(recs)
-        header = not os.path.exists(self.out_csv)
-        df.to_csv(self.out_csv, mode='a', header=header, index=False)
-        self._say(f"saved {len(recs)} correction(s) to {self.out_csv}")
+        if not _save_controller_rows(self, recs):
+            self._say('No new changes to save.')
+            return
+        self._say(f"saved {len(recs)} correction(s) to "
+                  f"{os.path.basename(self.out_csv)}{_run_on_save(self)}")
 
 
 def manual_correct(feet, aligned, trials, out_csv='brock_manual_rescore.csv',
-                   pad_s=10.0, session_tag=''):
+                   pad_s=10.0, session_tag='', plot_every=1):
     """Interactive inspection + click-to-resnip for a list of trials.
 
     For each requested (trial, rep) this brings up an inspection figure -
@@ -1726,9 +2186,12 @@ def manual_correct(feet, aligned, trials, out_csv='brock_manual_rescore.csv',
       * 'rescore A' / 'rescore B' - then click the plot twice: first click is
         the new bout START, second the new STOP, for that person only (usually
         just one person needs fixing, so each is prompted separately);
-      * 'save' - append the rescored [start, stop] rows to `out_csv`
+      * 'save' - replace the rescored trial/rep/person rows in `out_csv`
         (columns trial, rep, person, start_s, stop_s). Nothing is written
         until you press save, so a stray click never corrupts the file.
+
+    `plot_every=N` plots only every N-th sample (faster redraws; plotting
+    only - the mechanization and saved windows stay full-rate).
 
     `trials` is a list of trial numbers (both reps shown) and/or (trial, rep)
     tuples. `feet` is the matched foot recordings of BOTH subjects, keyed by
@@ -1742,9 +2205,13 @@ def manual_correct(feet, aligned, trials, out_csv='brock_manual_rescore.csv',
 
     Requires an interactive matplotlib backend - ensure_interactive_backend()
     raises a message with setup instructions (see INTERACTIVE_HELP) BEFORE any
-    figure comes up if the environment can't do it. Returns the list of
-    figure controllers (keep the return value in a variable in notebooks, or
-    the button callbacks are garbage-collected and clicks stop working).
+    figure comes up if the Python backend cannot load. Browser widget
+    connectivity must be checked separately. Returns the list of
+    figure controllers. Each figure retains its controller so callbacks remain
+    alive; keeping the returned list lets you inspect the pending edits.
+    In Jupyter this returns BEFORE you click: it cannot return future edits.
+    Save writes the edits to CSV; apply_manual_rescore() explicitly applies
+    saved edits to a table copy. It never mutates the input aligned table.
     """
     mode = ensure_interactive_backend()
     import matplotlib.pyplot as plt
@@ -1787,14 +2254,16 @@ def manual_correct(feet, aligned, trials, out_csv='brock_manual_rescore.csv',
         # ipympl auto-show fails when the backend was switched mid-cell (the
         # figure simply never appears - same fix as interactive_inspect_trial)
         with plt.ioff():
-            fig, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
+            fig, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True,
+                                     dpi=_interactive_dpi(12))
         fig.subplots_adjust(bottom=0.16, hspace=0.08)
         fig.suptitle(f'{session_tag} trial {trial} rep {rep} - inspect / rescore'
                      f'   (A blue, B orange; missed bouts have no shading)')
 
         ctrl = _RescoreFigure(fig, list(axes), trial, rep, rows, out_csv,
                               session_tag, feet, period, n_samples,
-                              window=(lo - pad_s, hi + pad_s))
+                              window=(lo - pad_s, hi + pad_s),
+                              plot_every=plot_every)
         # buttons + window text fields along the bottom
         slots = [('rescore A', ctrl.arm('a')), ('rescore B', ctrl.arm('b')),
                  ('save', ctrl.save)]
@@ -1810,15 +2279,15 @@ def manual_correct(feet, aligned, trials, out_csv='brock_manual_rescore.csv',
                           initial=f'{ctrl.window[k]:.1f}')
             box.on_submit(ctrl.on_window_submit)
             ctrl.boxes[name] = box
+        fig._rescore_controller = ctrl  # keep weak-reference callbacks alive
         controllers.append(ctrl)
         if mode == 'script':
             print(f'trial {trial} rep {rep}: close the window to move on '
                   f'(save first if you rescored)')
             plt.show(block=True)
     if mode == 'notebook' and controllers:
-        from IPython.display import display
         for ctrl in controllers:
-            display(ctrl.fig.canvas)
+            _display_interactive_figure(ctrl.fig)
         print(f'{len(controllers)} figure(s) above. Rescore with the buttons, '
               f'then press save on each figure you changed; corrections land '
               f'in {out_csv}.')
@@ -1827,6 +2296,9 @@ def manual_correct(feet, aligned, trials, out_csv='brock_manual_rescore.csv',
 
 def apply_manual_rescore(aligned, csv_path):
     """Fold saved manual corrections back into an aligned table copy.
+
+    Window-only for backward compatibility: use refresh_manual_distances()
+    afterwards to update measured distances, or plot_omnibus() to refresh/plot.
 
     Reads `csv_path` (trial, rep, person, start_s, stop_s - as written by
     manual_correct; the LAST correction wins when a bout was rescored twice)
@@ -1861,3 +2333,304 @@ def apply_manual_rescore(aligned, csv_path):
         if pd.isna(aligned.loc[i, 'walker']) or str(aligned.loc[i, 'walker']) == '':
             aligned.loc[i, 'walker'] = f"manual_{fx['person']}"
     return aligned
+
+
+def refresh_manual_distances(feet, aligned, pad_seconds=1.0, cache=None):
+    """Return a copy with manual-window distances remeasured from the IMUs.
+
+    apply_manual_rescore intentionally retains its historical window-only
+    behavior. Call this afterwards when saving/plotting corrected distances.
+    Use the alignment's original metric (maximum horizontal excursion with
+    one second of padding), restricted to the manually identified walker.
+    Trial assignments and original snip IDs remain unchanged; this does not
+    rerun sequence alignment or compute per-step/two-foot gait statistics.
+    `cache` (optional dict) memoizes distances by (person, start, stop), so
+    repeated refreshes only mechanize windows that changed.
+    """
+    refreshed = aligned.copy(deep=True)
+    manual = refreshed.get('manual', pd.Series(False, index=refreshed.index)).fillna(False)
+    for idx in refreshed.index[manual.astype(bool)]:
+        row = refreshed.loc[idx]
+        start, stop = float(row.start_s), float(row.stop_s)
+        if not (np.isfinite(start) and np.isfinite(stop) and 0 <= start < stop):
+            raise ValueError(f'Invalid manual window at row {idx}: {start}, {stop}')
+        person = str(row.walker).rsplit('_', 1)[-1]
+        recordings = {k: v for k, v in feet.items() if k.endswith('_' + person)}
+        if not recordings:
+            raise ValueError(f'No foot recordings for manual walker {row.walker!r}')
+        key = (person, start, stop, pad_seconds)
+        if cache is not None and key in cache:
+            distance = cache[key]
+        else:
+            distance = snip_distances(recordings, [[start, stop]],
+                                      pad_seconds=pad_seconds).iloc[0].distance_m
+            if cache is not None:
+                cache[key] = distance
+        if not np.isfinite(distance):
+            raise ValueError(f'Could not measure manual window at row {idx}')
+        refreshed.loc[idx, 'measured_m'] = distance
+        refreshed.loc[idx, 'duration_s'] = stop - start
+        refreshed.loc[idx, 'distance_error_m'] = distance - row.distance_m
+        # A manual gait boundary is no longer the original Start button cue.
+        if 'reaction_s' in refreshed:
+            refreshed.loc[idx, 'reaction_s'] = np.nan
+        if 'jumped_gun' in refreshed:
+            refreshed.loc[idx, 'jumped_gun'] = False
+    return refreshed
+
+
+def plot_omnibus(feet, events, result, aligned=None, report=None,
+                  refresh_distances=True, **plot_kwargs):
+    """Plot button presses and bout distances with optional scoring overrides.
+
+    result is the unchanged dict returned by align_snips_to_trial_table.
+    Omit aligned for the automatic baseline; supply a corrected table for
+    overrides. Manual distances are refreshed by default. Returns
+    (figure, axes, plotted_table); inputs are never modified and nothing is
+    saved. Set refresh_distances=False only for an already-refreshed table.
+    Uses draw_event_timeline, whose existing API remains unchanged.
+    """
+    table = (result['aligned'] if aligned is None else aligned).copy(deep=True)
+    if refresh_distances:
+        table = refresh_manual_distances(feet, table)
+    # The legacy renderer counts matched snip IDs. A recovered manual bout
+    # has a real window but no original snip: mark it only in the plot copy.
+    display_table = table.copy(deep=True)
+    recovered = (table.get('manual', pd.Series(False, index=table.index)).fillna(False)
+                 & table.start_s.notna() & table.stop_s.notna() & table.snip.isna())
+    display_table.loc[recovered, 'snip'] = -1
+    fig, axes = imu.draw_event_timeline(display_table, events, report, **plot_kwargs)
+    fig.suptitle('Omnibus — ' + ('automatic windows' if aligned is None
+                                else 'with saved window adjustments'),
+                 fontsize=10, y=0.995)
+    return fig, axes, table
+
+
+def delete_manual_windows(csv_path, pairs):
+    """Drop every saved correction for the given (trial, rep) pairs.
+
+    Returns the number of rows removed. Used to put a bout back to its
+    automatic bounds before rescoring it from scratch.
+    """
+    if not os.path.exists(csv_path):
+        return 0
+    old = pd.read_csv(csv_path)
+    drop = pd.Series([(int(t), int(r)) in set(pairs)
+                      for t, r in zip(old['trial'], old['rep'])], index=old.index)
+    if drop.any():
+        old[~drop].to_csv(csv_path, index=False)
+    return int(drop.sum())
+
+
+def corrected_alignment(feet, auto_aligned, rescore_csv, cache=None):
+    """The automatic table with every saved manual correction applied.
+
+    apply_manual_rescore() + refresh_manual_distances(): corrected windows,
+    remeasured distances, a boolean 'manual' column. `auto_aligned` is not
+    modified. With no corrections saved it is a copy of the automatic table.
+    """
+    return refresh_manual_distances(
+        feet, apply_manual_rescore(auto_aligned, rescore_csv), cache=cache)
+
+
+def manual_changes(auto_aligned, corrected):
+    """One row per corrected bout: new window/distance next to the automatic one.
+
+    automatic_m is NaN for a missed bout that was recovered by hand.
+    """
+    cols = ['trial', 'rep', 'bout', 'walker', 'start_s', 'stop_s', 'measured_m']
+    out = corrected.loc[corrected['manual'], cols].copy()
+    out['automatic_m'] = auto_aligned.loc[out.index, 'measured_m']
+    out['change_m'] = out['measured_m'] - out['automatic_m']
+    return out
+
+
+class ManualScoring:
+    """Section G's scoring session: open editors, and keep results saved.
+
+    Every Save press in an editor (and every rerun of a scoring cell, which
+    saves the open editors first) immediately:
+      1. updates the shared corrections file `rescore_csv` (one row per
+         trial/rep/person - a rescore REPLACES the old row);
+      2. rewrites the complete corrected table `manual_aligned_csv`
+         (the automatic table + all corrections, distances remeasured);
+      3. re-exports that trial's figure as
+         figures/<session_tag>/brock_<session_tag>_trial<N>_rep<R>_viz_manual.svg
+         for each corrected rep (beside the automatic ..._viz.svg, which is
+         never touched).
+    So there is no separate 'save results' step to forget. `.corrected` is
+    always the latest corrected table.
+
+        scoring = ManualScoring(feet, res['aligned'], RESCORE_CSV,
+                                MANUAL_ALIGNED_CSV, SESSION_TAG)
+        scoring.drag([(4, 1)])      # draggable gait start / bout end
+        scoring.click([(37, 2)])    # click a new start/stop (missed bouts)
+
+    Opening a (trial, rep) that already has saved corrections asks first
+    (see `on_existing`), since rerunning a cell usually means "I'm done with
+    these", not "score them again".
+    """
+
+    ON_EXISTING = ('ask', 'skip', 'rescore', 'clear')
+
+    def __init__(self, feet, auto_aligned, rescore_csv, manual_aligned_csv,
+                 session_tag, previous=None):
+        if previous is not None:        # re-created: save + close its editors
+            previous.close_editors()
+        self.feet, self.auto = feet, auto_aligned
+        self.rescore_csv, self.manual_aligned_csv = (rescore_csv,
+                                                     manual_aligned_csv)
+        self.session_tag = session_tag
+        self.editors = []
+        self._cache = {}
+        self.corrected = None
+        self.sync()
+
+    def __repr__(self):
+        return (f'<ManualScoring {self.session_tag}: '
+                f'{int(self.corrected["manual"].sum())} corrected bouts in '
+                f'{self.manual_trials()}, {len(self.editors)} open editor(s)>')
+
+    # -- saving ---------------------------------------------------------------
+    def manual_trials(self):
+        return sorted(self.corrected.loc[self.corrected['manual'], 'trial']
+                      .astype(int).unique().tolist())
+
+    def saved_pairs(self):
+        """(trial, rep) pairs with at least one saved correction."""
+        if not os.path.exists(self.rescore_csv):
+            return set()
+        df = pd.read_csv(self.rescore_csv)
+        return {(int(t), int(r)) for t, r in zip(df['trial'], df['rep'])}
+
+    def figure_path(self, trial, rep):
+        src = next(iter(self.feet.values())).file_path
+        folder = os.path.join(os.path.dirname(os.path.abspath(src)), 'figures',
+                              self.session_tag)
+        return os.path.join(folder, f'brock_{self.session_tag}_trial'
+                                    f'{int(trial)}_rep{int(rep)}_viz_manual.svg')
+
+    def sync(self, trials=()):
+        """Re-apply the corrections file; rewrite the table + `trials`' figures."""
+        self.corrected = corrected_alignment(self.feet, self.auto,
+                                             self.rescore_csv, cache=self._cache)
+        self.corrected.to_csv(self.manual_aligned_csv, index=False)
+        c = self.corrected
+        manual = {(int(t), int(r)) for t, r in
+                  zip(c.loc[c['manual'], 'trial'], c.loc[c['manual'], 'rep'])}
+        if not next(iter(self.feet.values())).file_path:
+            return c
+        for trial in trials:
+            for rep in (1, 2):              # only corrected reps get a figure
+                path = self.figure_path(trial, rep)
+                if (int(trial), rep) in manual:
+                    save_trial_figures(self.feet, c, self.session_tag,
+                                       suffix='viz_manual',
+                                       trials=[(trial, rep)])
+                elif os.path.exists(path):  # corrections cleared
+                    os.remove(path)
+        return c
+
+    def _on_save(self, trial):
+        self.sync(trials=[trial])
+        return (f'; table + trial {trial} figure(s) updated '
+                f'({int(self.corrected["manual"].sum())} corrected bouts)')
+
+    def close_editors(self):
+        """Save every open editor's finished edits, then close its figure."""
+        import matplotlib.pyplot as plt
+        for ed in self.editors:
+            if getattr(ed, 'pending', None) and not getattr(ed, '_discarded',
+                                                            False):
+                raise RuntimeError(
+                    f'trial {ed.trial}: a start was clicked without a stop - '
+                    f'finish (or re-press rescore) before rerunning')
+        for ed in self.editors:
+            if not getattr(ed, '_discarded', False):
+                ed.save()
+            try:
+                ed.fig.canvas.close()
+            except Exception:
+                pass
+            plt.close(ed.fig)
+        self.editors = []
+
+    # -- opening --------------------------------------------------------------
+    @staticmethod
+    def _check_pairs(pairs):
+        """[(trial, rep), ...] and/or bare trial numbers (= both reps)."""
+        def is_int(v):
+            return isinstance(v, (int, np.integer)) and not isinstance(v, bool)
+        if not isinstance(pairs, (list, tuple)):
+            pairs = None
+        out = []
+        for p in pairs or []:
+            if is_int(p) and p >= 1:
+                out += [(int(p), 1), (int(p), 2)]
+            elif (isinstance(p, (list, tuple)) and len(p) == 2
+                  and all(is_int(v) for v in p) and p[0] >= 1
+                  and p[1] in (1, 2)):
+                out.append((int(p[0]), int(p[1])))
+            else:
+                pairs = None
+                break
+        if pairs is None:
+            raise ValueError('Use trial numbers and/or (trial, repetition) '
+                             'pairs, e.g. [1, (4, 1), (5, 2)], or [] to just '
+                             'save and close.')
+        return list(dict.fromkeys(out))
+
+    def _resolve_existing(self, pairs, on_existing):
+        if on_existing not in self.ON_EXISTING:
+            raise ValueError(f'on_existing must be one of {self.ON_EXISTING}')
+        done = [p for p in pairs if p in self.saved_pairs()]
+        if not done:
+            return pairs
+        if on_existing == 'ask':
+            print('Already corrected and saved: '
+                  + ', '.join(f'trial {t} rep {r}' for t, r in done))
+            answer = input('[s]kip them (default) / [r]escore from the saved '
+                           'windows / [c]lear them back to automatic and '
+                           'rescore? ').strip().lower()[:1]
+            on_existing = {'r': 'rescore', 'c': 'clear'}.get(answer, 'skip')
+        if on_existing == 'skip':
+            print('skipping ' + ', '.join(f'{t}:{r}' for t, r in done))
+            return [p for p in pairs if p not in done]
+        if on_existing == 'clear':
+            n = delete_manual_windows(self.rescore_csv, done)
+            self.sync(trials=sorted({t for t, _ in done}))
+            print(f'cleared {n} saved correction(s); reopening from the '
+                  f'automatic bounds')
+        return pairs
+
+    def _open(self, pairs, open_one, on_existing):
+        pairs = self._check_pairs(pairs)
+        self.close_editors()            # saves them -> table/figures updated
+        if not pairs:
+            print(f'Saved and closed. {self!r}')
+            return self.editors
+        for trial, rep in self._resolve_existing(pairs, on_existing):
+            try:
+                for ed in open_one(trial, rep):
+                    ed.on_save = self._on_save
+                    self.editors.append(ed)
+            except ValueError as e:
+                print(f'Skipped trial {trial}, rep {rep}: {e}')
+        print(f'Each Save updates {os.path.basename(self.manual_aligned_csv)}'
+              f' and the rep\'s _viz_manual.svg. Rerunning either scoring '
+              f'cell saves these figures\' finished edits first.')
+        return self.editors
+
+    def drag(self, pairs, on_existing='ask', **kwargs):
+        """Open the draggable inspector for each (trial, rep)."""
+        return self._open(pairs, lambda t, r: [interactive_inspect_trial(
+            self.feet, self.corrected, trial=t, rep=r,
+            session_tag=self.session_tag, out_csv=self.rescore_csv, **kwargs)],
+            on_existing)
+
+    def click(self, pairs, on_existing='ask', **kwargs):
+        """Open the click-to-rescore figure for each (trial, rep)."""
+        return self._open(pairs, lambda t, r: manual_correct(
+            self.feet, self.corrected, [(t, r)],
+            session_tag=self.session_tag, out_csv=self.rescore_csv, **kwargs),
+            on_existing)

@@ -15,6 +15,11 @@ dependencies = [
     "openpyxl>=3.1.5",
 ]
 
+[tool.setuptools]
+# Brock notebooks also use this standalone module when installed in another project.
+py-modules = ["brock_functions"]
+package-dir = {"" = "src"}
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

@@ -679,3 +679,163 @@ still misbehaves it is a separate issue (need its error text).
   dropped sample and re-mechanized (_render_inspect_block gained i0_abs;
   drag state carries it; status says "slice extended back"). Verified: drop
   at 651500 -> new slice 651460, t0_abs exactly 651500, steps recomputed.
+
+### 2026-09-25 — manual scoring saves as you go (user: students will forget a separate save step)
+
+- **`ManualScoring`** (new, brock_functions): section G's session object.
+  `scoring.drag(pairs)` / `scoring.click(pairs)` open the editors; every Save
+  press (and every rerun, which saves+closes the open editors first) rewrites
+  `RESCORE_CSV` (upsert per trial/rep/person), `MANUAL_ALIGNED_CSV` (full
+  corrected table, distances remeasured, distance cache so only changed
+  windows re-mechanize) and `figures/<tag>/brock_<tag>_trial<N>_viz_manual.svg`
+  (regenerated via save_trial_figures; replaces the drag editor's old
+  snapshot of its interactive figure when a session hook is set). Editors get
+  an `on_save` hook; errors inside it go to the figure status line.
+- Opening a (trial, rep) that already has saved corrections asks
+  s(kip, default)/r(escore)/c(lear back to auto) via input(); `on_existing=`
+  bypasses it; `[]` never prompts (nbconvert-safe). `delete_manual_windows`,
+  `corrected_alignment`, `manual_changes` added.
+- Notebook s07_s08: G = G1 (widget check + creates `scoring`,
+  `previous=` adopts/saves a prior session) + two one-line cells; H is one
+  read-only compare cell (closes open editors first, rebuilds corrected from
+  the CSV, change table + both omnibus plots). Old H1/H2 and the singular
+  `figure/<tag>_Manual/` folder are gone.
+- Tests: tests/test_manual_scoring.py (mocked, fast). Smoke-tested against the
+  real s07_s08 data with the real drag/click editors (Agg, patched display).
+- NOT updated: scripts/make_brock_session_notebook.py is still far behind the
+  s07_s08 notebook's G/H (it predates Codex's G/H rework too).
+- **Interactive figure rendering (same day, verified in a real JupyterLab via
+  Chrome):** the drag/click figures were 1250 px wide inside a ~890 px output
+  column, so the right-hand time panels + drag lines hid behind a horizontal
+  scrollbar. They are now CREATED at a dpi that fits 860 px
+  (`_interactive_dpi`; changing dpi after creation sent a pre-view resize and
+  blanked the first figure — reproduced). `display_interactive_figure` (public;
+  G1 uses it) forces full ipympl frames until the first click, a defence
+  against diff frames painted on a freshly-cleared canvas — theory-backed but
+  the user's G1 blank-check was NOT reproduced here. Figure title moved above
+  the first bout title (they overlapped). Observed ipympl quirk, not fixed: in
+  one test only the first figure per kernel came up HiDPI; later ones were
+  half-resolution.
+
+### 2026-09-26 — drag-editor overview strip + plot-only downsampling
+
+- `interactive_inspect_trial(..., overview_pad_s=5.0, plot_every=1)`: a
+  foot-speed OVERVIEW axis above the bout blocks — all four feet mechanized
+  over [first bout start - pad, last bout end + pad] on session time; person
+  A black, B green, right foot dashed (`OVERVIEW_COLOR`); each bout's CURRENT
+  window shaded + labelled, re-shaded after every drag (`_bout_window_s`,
+  `_DraggableTrial._shade_overview`). Foot speed chosen as the
+  heading-agnostic signal.
+- `plot_every=N` (default 1 = no downsampling) on both editors: drag editor
+  thins dense lines after each render (`_decimate_lines`: >200 pts, no
+  markers — step dots/vlines untouched); manual_correct slices its traces.
+  Plotting only; mechanization and saved windows stay full-rate. ~40% faster
+  draw at N=2. ManualScoring passes both through (**kwargs); notebook G2/G3
+  expose OVERVIEW_PAD_S / PLOT_EVERY.
+- **One figure builder for static + interactive (user-directed):**
+  `_build_inspect_figure` now draws the inspection figure for BOTH
+  `inspect_snipped_trial`/`save_trial_figures` and `interactive_inspect_trial`
+  (which only adds drag lines/buttons, a fitted dpi and a bottom strip).
+  Layout = one SECTION PER REP: that rep's foot-speed overview, then its bout
+  blocks. Per-rep, not per-trial, because a trial's two reps are ~an hour
+  apart (trial 4: 1016 s vs 5100 s) — a shared overview was ~4000 s wide and
+  took ~50 s to mechanize per trial; per-rep the batch is ~1.7 s/trial again.
+  `overview_pad_s` / `plot_every` / `rep` on all three functions.
+  `_inspect_rows` validates before the interactive backend switch (the figure
+  must be created AFTER `%matplotlib widget`). Static figures are NOT built
+  under ioff, so the playground's inline display still works. The 48 Dropbox
+  s07_s08 figures were not regenerated.
+- **save_trial_figures is one file per (trial, rep)** (user-directed):
+  `brock_<tag>_trial<N>_rep<R>_<suffix>.svg`; `trials=` takes trial numbers
+  (both reps) and/or (trial, rep) pairs. ManualScoring exports/removes
+  `..._trial<N>_rep<R>_viz_manual.svg` only for CORRECTED reps
+  (`figure_path(trial, rep)`). Old per-trial `..._trial<N>_viz.svg` files in
+  Dropbox figures/s07_s08 are stale leftovers under the old naming — not
+  deleted, not regenerated.
+- Overview strip gained a second time base (user): absolute sample index on
+  a top secondary axis (session time / period), like the bout |A| panels;
+  its legend moved outside to the right (overview width 0.84) and each
+  section got 0.6 in of headroom (`ov_pad`) for the new ticks.
+- Drag editor's 'close without saving' renamed **'continue without saving'**
+  (user: it never actually closed in their browser). It now `discard()`s:
+  marks the editor discarded, freezes drags, refuses save with a status
+  message, and leaves the figure for the next scoring-cell rerun / H to close
+  (closing an ipympl view from its own callback is unreliable). `close` kept
+  as an alias.
+- `ManualScoring` pair lists accept bare trial numbers = both reps (user hit
+  a ValueError with `scoring.click([1])`): `[1, (37, 2)]`. drag() skips a rep
+  with no matched bouts (message); click() opens it (missed-bout scoring).
+- **One pad + scrubbing context (user)**: `overview_pad_s` renamed `pad_s`
+  on inspect_snipped_trial / save_trial_figures / interactive_inspect_trial
+  (notebook G2: `PAD_S`). It now sets BOTH the overview span and each bout
+  block's grey context, which shows raw |A| AND foot speed (one
+  mechanization of the whole context window) outside the analysed slice.
+  `prefix_seconds` is an optional pre-side override (default None = pad_s).
+  `_render_inspect_block(context_s=(pre, post))`.
+- Drag editor: DOUBLE-CLICK a block's time axes left/right of centre =
+  `extend_s` (5 s) more context on that side (view only, blk['context']).
+  A click that doesn't move a line is now a no-op (it used to re-run the bout
+  and mark it adjusted, so Save would write it). Dropping the gait start in
+  standing time snaps t=0 to the walking onset; the saved start now follows
+  the DISPLAYED t0 (it used to save the raw drop point) and the status says
+  "snapped +X s".
+- Bout-block title fix (user: unreadable on very short bouts): it was the
+  equal-aspect narrow overhead's set_title, and that panel shrinks vertically
+  for a short walk, sinking the title mid-block under the wide overhead. Now
+  a text owned by the wide overhead (axes5[1]), blended transform x = narrow
+  panel left, y = wide panel top + 34 pt — fixed at the block top; cleared
+  with the axes on interactive redraws. Checked on trial 16 rep 1 (1.6 m).
+
+### 2026-09-26 (later) — walker assignment from the protocol order
+
+- Diagnosed from s07_s08 trial 13 rep 1 (user: bout 2's per-bout plots showed
+  no foot speed although the overview showed green walking): NOT a projection
+  problem — the bout was attributed to the wrong PERSON. snip_distances names
+  the walker by max horizontal excursion over single feet; on 2.5 m trials a
+  standing foot's integration drift (3.34 m) beat the real walker (1.4-1.8 m),
+  so both bouts of the trial-rep were pinned on 'a' and the blocks plotted a
+  standing person (slice collapsed to 1 s, 0 steps). 20 trial-reps had both
+  bouts on one person. Naive "more swing time" was no better (both people
+  move during hand-offs).
+- **`assign_walkers_by_protocol(feet, result, first_walker='a')`** (new,
+  user-directed rule): rep 1 = `first_walker` walks bout 1, other person
+  bout 2; rep 2 flipped. Relabels matched bouts, takes distance from that
+  person's farther foot (per-foot `dist_*` already in result['measured'] — no
+  re-mechanization), recomputes reaction_s/jumped_gun; adds `walker_auto` +
+  `walker_changed`. Snip->trial matching NOT redone. s07_s08: 42/189 changed,
+  same-person trial-reps 20 -> 0, |distance error| 95th pct 2.07 -> 1.08 m
+  (independent check — the rule never sees expected distance).
+- Also unblocks manual fixes: apply_manual_rescore matches corrections by
+  walker suffix, so a person-B correction on an all-'a' trial-rep was
+  silently ignored.
+- Notebook: `FIRST_WALKER = 'a'` in config (after the xlsx parse); C cell
+  applies it right after align_snips_to_trial_table. The cached
+  ALIGNED_CSV / figures are stale until the notebook is rerun.
+  tests/test_walker_protocol.py.
+
+### 2026-09-27 — load previous manual scoring OR score now (section G)
+
+- New **G0** cell: `LOAD_PREVIOUS_MANUAL_SCORING`. True = load RESCORE_CSV via
+  `corrected_alignment` into `aligned` (+ writes MANUAL_ALIGNED_CSV, prints the
+  corrected trials; FileNotFoundError with instructions if the CSV is
+  missing; saves+closes any open editors if the mode is switched mid-session)
+  and G1-G3 print "skipped" instead of opening widgets — Run All safe.
+  False = score now, G1-G3 as before. `MANUAL_ALIGNED_CSV` moved from G1 to
+  G0. G1's body is indented under the guard (IPython transforms the indented
+  `%matplotlib widget` — verified). H closes all figures after saving the
+  editors (G1's widget check was leaking into H's output).
+- Verified end-to-end with nbconvert on real s07_s08 data in BOTH modes
+  (notebook's actual G0-G3 + H cells, scratch RESCORE_CSV).
+- Intro markdown (cell 0) gained **"End results — what to look at, and
+  where"**: figures (per trial-rep `_viz.svg` from F, `_viz_manual.svg` from
+  G, `omnibus_auto` / `omnibus_plus_manual` from H) and CSVs (auto_aligned =
+  E, manual_rescore = the corrections, manual_aligned = final table); C/G/H
+  bullets updated to the protocol-walker fix, G0 switch, and compare step.
+- H now SAVES `figures/<tag>/brock_<tag>_omnibus_auto.svg` always and
+  `..._omnibus_plus_manual.svg` when corrections exist. Verified via nbconvert
+  (load mode, scratch H5_FILE so nothing landed in Dropbox).
+- G0 load mode now reports what was loaded (user: so students can check it
+  worked): N saved corrections -> M bouts applied, one line per trial-rep
+  (bout, person, new window), a WARNING if any saved row matched no bout, and
+  a before/after table (auto vs manual window + distance, expected). Verified
+  via nbconvert with a normal, a recovered-missed, and an unmatchable row.
