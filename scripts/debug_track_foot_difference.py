@@ -28,12 +28,13 @@ FILES = {'left': '20251029-154305_LF_Pilot_Ch_Oct29.h5',
 DEFAULT_OUTPUT = ROOT / 'debug' / 'track_foot_difference'
 
 
-def extract_track_bout(output=DEFAULT_OUTPUT, *, bout_rank=0):
+def extract_track_bout(output=DEFAULT_OUTPUT, *, bout_rank=0, padding_seconds=0.):
     """Copy demo detection/longest-near-16:34 selection, using BOTH actual files.
 
     Select independently to audit detection, then use the union of both selected
     time intervals. Preserve sensor timestamps and interpolate only for scoring;
     never pair equal sample indices from independently started recordings.
+    Optional padding includes quiet data so mechanization starts/ends at rest.
     """
     output = Path(output); output.mkdir(parents=True, exist_ok=True)
     records = {side: imu.load_imu_recording(str(ROOT/'data'/file)) for side, file in FILES.items()}
@@ -48,13 +49,16 @@ def extract_track_bout(output=DEFAULT_OUTPUT, *, bout_rank=0):
         chosen[side] = sorted(matches, key=lambda b: b.duration_seconds, reverse=True)[bout_rank]
         candidates[side] = [{'start': rec.time_datetime[b.start_idx].isoformat(),
                              'duration_s': b.duration_seconds} for b in matches]
-    start = min(rec.raw_time[chosen[s].start_idx] for s, rec in records.items())
-    end = max(rec.raw_time[chosen[s].end_idx-1] for s, rec in records.items())
+    if not np.isfinite(padding_seconds) or padding_seconds < 0:
+        raise ValueError('padding_seconds must be finite and nonnegative')
+    start = min(float(rec.raw_time[chosen[s].start_idx]) for s, rec in records.items()) - padding_seconds*1e6
+    end = max(float(rec.raw_time[chosen[s].end_idx-1]) for s, rec in records.items()) + padding_seconds*1e6
     period = records['left'].period
     if not np.isclose(period, records['right'].period):
         raise ValueError('Different sampling periods; this experiment requires matching rates')
     arrays = {'period': period}
-    metadata.update(candidates=candidates, selected={}, calibration={}, bout_rank=bout_rank)
+    metadata.update(candidates=candidates, selected={}, calibration={}, bout_rank=bout_rank,
+                    padding_seconds=padding_seconds)
     for side, rec in records.items():
         b = chosen[side]
         idx = np.flatnonzero((rec.raw_time >= start) & (rec.raw_time <= end))

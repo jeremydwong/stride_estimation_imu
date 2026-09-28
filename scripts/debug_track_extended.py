@@ -220,6 +220,10 @@ def run_all(output=base.DEFAULT_OUTPUT):
     configs=[c for c in extended_configs() if c[0] in ['baseline','v1_gravity_bias','stride_gravity']]
     validation_selected,validation_metrics=run_real(validation,validation_metadata,validation_output,configs)
     plot_extended(validation_selected,validation,validation_output,'Separate 16:31 walking bout (geometry unconfirmed)')
+    padded_output=output/'padded'
+    padded,padded_metadata=base.extract_track_bout(padded_output,padding_seconds=1.)
+    padded_selected,_=run_real(padded,padded_metadata,padded_output,configs)
+    plot_extended(padded_selected,padded,padded_output,'Quiet-padded track bout')
     synthetic_metrics,gates=run_synthetic(output)
     calibration_sweep(data,output)
     print(synthetic_metrics.round(3).to_string(index=False))

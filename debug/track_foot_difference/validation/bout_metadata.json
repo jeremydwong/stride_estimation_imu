@@ -91,5 +91,6 @@
       ]
     }
   },
-  "bout_rank": 1
+  "bout_rank": 1,
+  "padding_seconds": 0.0
 }
