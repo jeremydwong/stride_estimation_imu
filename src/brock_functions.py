@@ -122,6 +122,46 @@ def first_motion(W, period):
     return leading_static_block(W, period)[1]
 
 
+END_LOOKAHEAD_S = 1.0   # snug_end looks this far past the window (see below)
+
+# A "true stop" after the gait end: BOTH feet raw-still (|gyro| < STILL_RAD_S,
+# as for walk onset) for STOP_HOLD_S, starting within STOP_SEARCH_S of the
+# snugged end (room for a slow closing step). Calibrated on s07_s08: during
+# walking both feet are essentially never still together even 0.15 s (132/151
+# mid-walk windows), while hand-off pauses are often only 0.25-0.5 s.
+# Automatic bouts whose Stop-press window shows no stop are re-snugged with
+# the window extended STOP_EXTEND_STEP_S at a time, up to STOP_EXTEND_MAX_S.
+# Manual/dragged ends are never extended - only flagged (stop_found=False).
+STILL_RAD_S = 0.35
+STOP_HOLD_S = 0.25
+STOP_SEARCH_S = 1.5
+STOP_EXTEND_STEP_S = 1.0
+STOP_EXTEND_MAX_S = 3.0
+
+
+def stop_after(feet, subject, end_abs, period):
+    """Did the walker come to a TRUE stop after the gait end `end_abs`?
+
+    True if both of the subject's feet are raw-still (|gyro| < STILL_RAD_S)
+    for STOP_HOLD_S, starting within STOP_SEARCH_S after end_abs. Reads the
+    raw gyro only (no mechanization), so it may look past any window.
+    `feet` is keyed (subject, side) as for bout_sync_strides_steps.
+    """
+    hold = int(round(STOP_HOLD_S / period))
+    a = int(end_abs)
+    b = min(min(len(feet[(subject, s)].Wb) for s in ('left', 'right')),
+            a + int(round(STOP_SEARCH_S / period)) + hold)
+    if b - a < hold:
+        return False
+    still = np.ones(b - a, bool)
+    for side in ('left', 'right'):
+        still &= (np.linalg.norm(feet[(subject, side)].Wb[a:b], axis=1)
+                  / period) < STILL_RAD_S
+    # a run of >= hold still samples that starts within the search span
+    run = np.convolve(still.astype(int), np.ones(hold, int), 'valid') == hold
+    return bool(run[:int(round(STOP_SEARCH_S / period)) + 1].any())
+
+
 def bout_sync_strides_steps(feet, subject, i0, i1, period,
                   initial_separation=0.2, anchor_mode='firstonly',
                   gravity_seconds=1.0, force_snug_abs=None, snug_end_enabled=True):
@@ -163,7 +203,6 @@ def bout_sync_strides_steps(feet, subject, i0, i1, period,
     # (the true side-by-side stance often sits just before the Start press).
     # The kept stretch is pinned as stance by the mechanization's own
     # footfall criterion; snug_start's valley then lands at its end.
-    STILL_RAD_S = 0.35
     grav = int(round(gravity_seconds / period))
     a0 = max(0, i0 - grav)                       # search floor (pre-click cap)
     b0 = min(i1, i0 + int(round(5.0 / period)))  # onset must be near the click
@@ -185,10 +224,20 @@ def bout_sync_strides_steps(feet, subject, i0, i1, period,
     result = process_bout(feet, subject, snip, i1, period, pad_seconds=0.0)
     end_foot = None
     if snug_end_enabled:
-        end_snap, end_foot = imu.snug_end(result['left_info'], result['right_info'])
+        # Find the end on a trajectory that runs ~1 s PAST the window: cut at
+        # the window edge, a swing still in progress there is truncated into
+        # a fake landing (a mid-walk end drag landed mid-swing). The gait
+        # ends at the last landing completed inside the window.
+        n_rec = min(len(feet[(subject, s)].Wb) for s in ('left', 'right'))
+        ext_stop = min(n_rec, i1 + int(round(END_LOOKAHEAD_S / period)))
+        ext = (result if ext_stop <= i1 else
+               process_bout(feet, subject, snip, ext_stop, period,
+                            pad_seconds=0.0))
+        end_snap, end_foot = imu.snug_end(ext['left_info'], ext['right_info'],
+                                          limit=i1 - 1 - ext['slice'][0])
         if end_snap is not None:
             # snug_end is inclusive; processing slices are exclusive at i1.
-            trimmed_stop = result['slice'][0] + end_snap + 1
+            trimmed_stop = ext['slice'][0] + end_snap + 1
             if snip + 2 <= trimmed_stop < result['slice'][1]:
                 result = process_bout(feet, subject, snip, trimmed_stop, period,
                                       pad_seconds=0.0)
@@ -233,6 +282,8 @@ def bout_sync_strides_steps(feet, subject, i0, i1, period,
     # figures and the notebook table.
     return {'subject': subject, 'period': period, 'onset': onset,
             't_ref': t_ref, 't0_abs': t0_abs, 'end_abs': j1 - 1,
+            'stop_found': stop_after(feet, subject, j1 - 1, period),
+            'end_extended_s': 0.0,
             'slice': (j0, j1), 't': t,
             'sides': sides, 'step_sides': step_sides, 'steps': steps,
             'n_strides': n_strides, 'initial_separation': initial_separation,
@@ -1001,19 +1052,153 @@ def feet_pairs_from_labels(data):
     return out
 
 
+def snugged_bout(pairs, subject, i0, i1, period, manual=False, resnug=True,
+                 snug_abs=None, end_overridden=False, **kwargs):
+    """Run one bout through the pipeline with THE snugging rule.
+
+    The single place that decides how a bout's gait start/end are found, so
+    automatic and manual bouts get identical timing:
+
+    * resnug=True (default): [i0, i1] is only the SEARCH window - exactly
+      like the Start/Stop button presses. snug_start puts the gait start in
+      the valley before the first committed swing, snug_end the gait end in
+      the settling valley after the last one. Used for every automatic bout
+      and, by default, for manual windows too.
+    * resnug=False (legacy): a manual window IS the gait - the start is
+      pinned (snug_abs, else i0) and the end is not trimmed. An automatic
+      bout still snugs, except that an overridden end (end_overridden, the
+      drag editor) is kept as dragged.
+
+    Stop check (stop_after): if the gait end is not followed by a true
+    stop, an AUTOMATIC bout whose end is still the Stop press is re-snugged
+    with the window extended STOP_EXTEND_STEP_S at a time (up to
+    STOP_EXTEND_MAX_S) until a stop is found - the press may have come
+    before the walk ended. A manual or dragged end is NEVER extended (the
+    scientist's judgement stands); it is only flagged. The result carries
+    stop_found and end_extended_s.
+
+    kwargs go to bout_sync_strides_steps (initial_separation, anchor_mode).
+    Returns its result dict (t0_abs = gait start, end_abs = gait end, both
+    absolute samples).
+    """
+    import warnings
+    rank_warning = (   # np.RankWarning in numpy 1.x, moved in 2.x
+        getattr(getattr(np, 'exceptions', None), 'RankWarning', None)
+        or getattr(np, 'RankWarning', RuntimeWarning))
+    if resnug:
+        force, snug_end = None, True
+    else:
+        force = snug_abs if snug_abs is not None else (i0 if manual else None)
+        snug_end = not (manual or end_overridden)
+    may_extend = snug_end and not manual and not end_overridden
+    n_rec = min(len(pairs[(subject, s)].Wb) for s in ('left', 'right'))
+    step = int(round(STOP_EXTEND_STEP_S / period))
+    n_steps = int(round(STOP_EXTEND_MAX_S / STOP_EXTEND_STEP_S)) if may_extend else 0
+    with warnings.catch_warnings():  # stride polyfit warns on short bouts
+        warnings.simplefilter('ignore', rank_warning)
+        first = None
+        for k in range(n_steps + 1):
+            stop = min(n_rec, int(i1) + k * step)
+            res = bout_sync_strides_steps(pairs, subject, int(i0), stop, period,
+                                          force_snug_abs=force,
+                                          snug_end_enabled=snug_end, **kwargs)
+            res['end_extended_s'] = (stop - int(i1)) * period
+            first = res if first is None else first
+            if res['stop_found']:
+                return res
+            if stop >= n_rec:
+                break
+    # no stop even when extended: keep the ORIGINAL window's gait, flagged
+    # (searching further would only reach the next movement)
+    first['end_extended_s'] = 0.0
+    first['stop_searched_s'] = n_steps * STOP_EXTEND_STEP_S
+    return first
+
+
+def add_gait_timing(feet, aligned, only=None, resnug=True, cache=None):
+    """Add gait_start_s / gait_end_s / gait_duration_s from the snugged bouts,
+    plus stop_found (a true stop follows the gait end) and end_extended_s
+    (how far an automatic window had to be extended to find it; 0 = none).
+
+    For every matched bout (or only the rows where boolean `only` is True),
+    runs snugged_bout() on its [start_s, stop_s] window with the walker's
+    feet: the same snugging the figures show, so table timing and figures
+    agree, for automatic and manual bouts alike. Session seconds; NaN where
+    the bout is missed or the pipeline fails. `cache` (dict) memoizes by
+    (walker, window, manual, resnug). Returns a copy.
+    """
+    out = aligned.copy()
+    for col in ('gait_start_s', 'gait_end_s', 'gait_duration_s',
+                'end_extended_s'):
+        if col not in out:
+            out[col] = np.nan
+    if 'stop_found' not in out:
+        out['stop_found'] = pd.Series(pd.NA, index=out.index, dtype='boolean')
+    pairs = feet_pairs_from_labels(feet)
+    period = next(iter(feet.values())).period
+    sel = out['start_s'].notna() & out['stop_s'].notna()
+    if only is not None:
+        sel &= pd.Series(only, index=out.index).fillna(False).astype(bool)
+    for idx in out.index[sel]:
+        row = out.loc[idx]
+        person = str(row['walker']).rsplit('_', 1)[-1]
+        manual = bool(row.get('manual', False) == True)
+        key = ('gait', person, float(row['start_s']), float(row['stop_s']),
+               manual, resnug)
+        if cache is not None and key in cache:
+            g0, g1, stop, ext = cache[key]
+        else:
+            g0 = g1 = ext = np.nan
+            stop = pd.NA
+            subject = {'a': 's1', 'b': 's2'}.get(person)
+            if subject and (subject, 'left') in pairs and (subject, 'right') in pairs:
+                try:
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        r = snugged_bout(pairs, subject,
+                                         int(row['start_s'] / period),
+                                         int(row['stop_s'] / period), period,
+                                         manual=manual, resnug=resnug)
+                    g0, g1 = r['t0_abs'] * period, r['end_abs'] * period
+                    stop, ext = bool(r['stop_found']), float(r['end_extended_s'])
+                except Exception:
+                    pass
+            if cache is not None:
+                cache[key] = (g0, g1, stop, ext)
+        out.loc[idx, ['gait_start_s', 'gait_end_s', 'gait_duration_s',
+                      'end_extended_s']] = (g0, g1, g1 - g0, ext)
+        out.loc[idx, 'stop_found'] = stop
+    return out
+
+
+def _stop_note(res, manual=False):
+    """(text, is_warning) describing the stop check of a snugged bout."""
+    if res.get('stop_found') and not res.get('end_extended_s'):
+        return '', False
+    if res.get('stop_found'):
+        return (f"; window extended +{res['end_extended_s']:.0f} s to find "
+                f"the stop", False)
+    if manual:
+        return '; NO clear stop in window - your end used as is', True
+    searched = res.get('stop_searched_s') or 0
+    return (f'; NO clear stop' + (f' (searched +{searched:.0f} s past the '
+                                  f'press; end kept at the press)' if searched
+                                  else '') + ' - check the end', True)
+
+
 def _render_inspect_block(axes5, feet, pairs, row, period,
                           prefix_seconds=5.0,
                           ymax=(imu.ACCEL_YMAX, imu.FOOTSPEED_YMAX,
                                 imu.STEPSPEED_YMAX),
                           initial_separation=0.2, anchor_mode='firstonly',
                           i1_abs=None, snug_abs=None, i0_abs=None,
-                          context_s=None):
+                          context_s=None, resnug=True):
     """(Re)draw ONE bout block of the inspection figure onto `axes5`.
 
     Shared by inspect_snipped_trial() and the draggable interactive version.
-    Clears the axes first, so it can redraw in place. `i1_abs` overrides the
-    bout end (absolute sample; default = the Stop press from `row`), and
-    `snug_abs` pins the snug gait start instead of detecting it. Returns the
+    Clears the axes first, so it can redraw in place. `i0_abs` / `i1_abs`
+    override the search window (absolute samples; default = the row's
+    start_s/stop_s). Snugging follows snugged_bout(resnug=...); `snug_abs`
+    pins the gait start only when resnug=False. Returns the
     bout_sync_strides_steps() result dict, or None when the pipeline failed
     (the failure is written on the axes).
     """
@@ -1045,18 +1230,12 @@ def _render_inspect_block(axes5, feet, pairs, row, period,
     i0 = int(i0_abs) if i0_abs is not None else int(row['start_s'] / period)
     i1 = int(i1_abs) if i1_abs is not None else int(row['stop_s'] / period)
     try:
-        # the stride-variability polyfit warns on very short bouts; harmless
-        import warnings
-        rank_warning = (   # np.RankWarning in numpy 1.x, moved in 2.x
-            getattr(getattr(np, 'exceptions', None), 'RankWarning', None)
-            or getattr(np, 'RankWarning', RuntimeWarning))
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', rank_warning)
-            res = bout_sync_strides_steps(
-                pairs, subject, i0, i1, period,
-                initial_separation=initial_separation,
-                anchor_mode=anchor_mode, force_snug_abs=snug_abs,
-                snug_end_enabled=i1_abs is None and row.get('manual', False) != True)
+        res = snugged_bout(pairs, subject, i0, i1, period,
+                           manual=row.get('manual', False) == True,
+                           resnug=resnug, snug_abs=snug_abs,
+                           end_overridden=i1_abs is not None,
+                           initial_separation=initial_separation,
+                           anchor_mode=anchor_mode)
         imu.draw_bout_block(axes5, res, ymax=ymax)
 
         ax_acc = axes5[2]
@@ -1102,7 +1281,9 @@ def _render_inspect_block(axes5, feet, pairs, row, period,
                         ha='center', va='top')
         reaction_s = (t0_abs - i0) * period    # Start press -> snug t=0
         duration_s = (res['end_abs'] - t0_abs) * period
-        end_is_manual = i1_abs is not None or row.get('manual', False) == True
+        # the end is only un-snugged in legacy (resnug=False) manual/dragged use
+        end_is_manual = (not resnug and
+                         (i1_abs is not None or row.get('manual', False) == True))
         end_label = ('Manual end' if end_is_manual else
                      'Snug end' if res['steps']['end_snap_foot'] is not None else
                      'Window end (no strong swing)')
@@ -1118,13 +1299,18 @@ def _render_inspect_block(axes5, feet, pairs, row, period,
                         xytext=(-6, 0), textcoords='offset points',
                         ha='right', va='top', color='tab:purple', fontsize=8,
                         fontweight='bold', bbox=dict(fc='white', ec='none', alpha=.8))
+        stop_note, stop_warn = _stop_note(res, manual=end_is_manual or
+                                          row.get('manual', False) == True
+                                          or i1_abs is not None)
         ax_acc.text(0.01, 0.04,
                     f'reaction ≈ {reaction_s:.2f} s, '
                     f'gait duration ≈ {duration_s:.1f} s; '
                     + (f'end trimmed {trimmed_s:.2f} s' if not end_is_manual
-                       else 'manual end'),
+                       else 'manual end') + stop_note,
                     transform=ax_acc.transAxes, fontsize=8, va='bottom',
-                    bbox=dict(fc='white', ec='0.8', alpha=0.8, pad=2))
+                    color='tab:red' if stop_warn else 'black',
+                    bbox=dict(fc='white', ec='tab:red' if stop_warn else '0.8',
+                              alpha=0.8, pad=2))
         ax_acc.set_xlim(left=min((a_pre - t0_abs) * period,
                                  (i0 - t0_abs) * period - 0.5),
                         right=(b_post - t0_abs) * period)
@@ -1158,7 +1344,7 @@ def _build_inspect_figure(feet, aligned, trial, rep=None, session_tag='',
                                 imu.STEPSPEED_YMAX),
                           initial_separation=0.2, anchor_mode='firstonly',
                           pad_s=5.0, plot_every=1,
-                          interactive=False):
+                          interactive=False, resnug=True):
     """THE inspection-figure layout, shared by the static and drag versions.
 
     Per repetition: a foot-speed overview (_draw_foot_speed_overview) across
@@ -1214,7 +1400,7 @@ def _build_inspect_figure(feet, aligned, trial, rep=None, session_tag='',
             context = [pad_s if prefix_seconds is None else prefix_seconds,
                        pad_s]
             res = _render_inspect_block(axes5, feet, pairs, row, period,
-                                        context_s=context,
+                                        context_s=context, resnug=resnug,
                                         ymax=ymax,
                                         initial_separation=initial_separation,
                                         anchor_mode=anchor_mode)
@@ -1237,7 +1423,7 @@ def inspect_snipped_trial(feet, aligned, trial, session_tag='',
                           ymax=(imu.ACCEL_YMAX, imu.FOOTSPEED_YMAX,
                                 imu.STEPSPEED_YMAX),
                           initial_separation=0.2, anchor_mode='firstonly',
-                          pad_s=5.0, plot_every=1, rep=None):
+                          pad_s=5.0, plot_every=1, rep=None, resnug=True):
     """Draw the full inspection figure for ONE trial and return the Figure.
 
     On top, a foot-speed OVERVIEW: every foot on one session-time axis from
@@ -1281,6 +1467,9 @@ def inspect_snipped_trial(feet, aligned, trial, session_tag='',
         Seconds of context: the overview spans pad_s before the first / after
         the last bout, and each bout block shows pad_s of grey context on
         both sides.
+    resnug : bool
+        Snug manual windows like button presses (default; see snugged_bout).
+        False draws a manual window as the gait itself.
     plot_every : int
         Plot only every N-th sample (smaller/faster figures; plotting only -
         all computation stays full-rate). 1 = every sample.
@@ -1296,7 +1485,7 @@ def inspect_snipped_trial(feet, aligned, trial, session_tag='',
         feet, aligned, trial, rep=rep, session_tag=session_tag,
         prefix_seconds=prefix_seconds, ymax=ymax,
         initial_separation=initial_separation, anchor_mode=anchor_mode,
-        pad_s=pad_s, plot_every=plot_every)
+        pad_s=pad_s, plot_every=plot_every, resnug=resnug)
     if save_path is not None:
         fig.savefig(save_path)
     return fig
@@ -1307,7 +1496,7 @@ def save_trial_figures(feet, aligned, session_tag, out_dir=None,
                        ymax=(imu.ACCEL_YMAX, imu.FOOTSPEED_YMAX,
                              imu.STEPSPEED_YMAX), initial_separation=0.2,
                        anchor_mode='firstonly', pad_s=5.0,
-                       plot_every=1):
+                       plot_every=1, resnug=True):
     """Batch wrapper: inspect_snipped_trial() per trial REPETITION, to disk.
 
     One file per (trial, rep) - each rep's foot-speed overview plus its bout
@@ -1357,7 +1546,7 @@ def save_trial_figures(feet, aligned, session_tag, out_dir=None,
                 feet, aligned, trial, rep=rep, session_tag=session_tag,
                 save_path=path, ymax=ymax,
                 initial_separation=initial_separation, anchor_mode=anchor_mode,
-                pad_s=pad_s, plot_every=plot_every)
+                pad_s=pad_s, plot_every=plot_every, resnug=resnug)
         except ValueError:
             continue                      # no matched bouts for this rep
         plt.close(fig)
@@ -1451,8 +1640,10 @@ OVERVIEW_COLOR = {'a': 'black', 'b': 'tab:green'}   # person 1 / person 2
 
 
 def _bout_window_s(row, st, period):
-    """(start_s, stop_s) of a bout, with any drag adjustments applied."""
-    start = st['snug_abs'] * period if 'snug_abs' in st else float(row['start_s'])
+    """(start_s, stop_s) of a bout's window, with any drag adjustments."""
+    start = (st['i0_abs'] * period if 'i0_abs' in st else
+             st['snug_abs'] * period if 'snug_abs' in st else
+             float(row['start_s']))
     stop = st['i1_abs'] * period if 'i1_abs' in st else float(row['stop_s'])
     return start, stop
 
@@ -1535,6 +1726,7 @@ class _DraggableTrial:
     GRAB = ('snug', 'end')
     on_save = None    # ManualScoring hook: called with the trial after a save
     plot_every = 1    # plot-only downsampling (see _decimate_lines)
+    resnug = True     # drags move the SEARCH window; gait bounds re-snug in it
     extend_s = 5.0    # double-click: widen that side of a block's view by this
 
     def __init__(self, fig, feet, pairs, period, blocks, prefix_seconds,
@@ -1592,7 +1784,7 @@ class _DraggableTrial:
         st = self.state.get(rep_bout, {})
         res = _render_inspect_block(
             blk['axes5'], self.feet, self.pairs, blk['row'], self.period,
-            context_s=blk['context'], ymax=self.ymax,
+            context_s=blk['context'], ymax=self.ymax, resnug=self.resnug,
             initial_separation=self.initial_separation,
             anchor_mode=self.anchor_mode,
             i1_abs=st.get('i1_abs'), snug_abs=st.get('snug_abs'),
@@ -1695,6 +1887,9 @@ class _DraggableTrial:
         rep_bout = (int(row['rep']), int(row['bout']))
         st = self.state.setdefault(rep_bout, {})
         new_abs = int(round(t0_abs + x / self.period))
+        if self.resnug:
+            self._release_resnug(bi, name, st, new_abs, rep_bout)
+            return
         if name == 'snug':
             j0, j1 = res['slice']
             end_abs = st.get('i1_abs') or int(row['stop_s'] / self.period)
@@ -1733,6 +1928,39 @@ class _DraggableTrial:
                   f'{snapped} Press \'save adjustments\' to save'
                   f' (original clicks stay untouched in the aligned table)')
 
+    def _release_resnug(self, bi, name, st, new_abs, rep_bout):
+        """Drop with re-snugging on: the line moves the SEARCH window edge.
+
+        Like moving a button press: the gait start/end are then re-found by
+        the same snugging as every automatic bout, inside the new window.
+        """
+        row = self.blocks[bi]['row']
+        start = st.get('i0_abs', int(row['start_s'] / self.period))
+        end = st.get('i1_abs', int(row['stop_s'] / self.period))
+        one_s = int(1.0 / self.period)
+        if name == 'snug':
+            st['i0_abs'] = int(min(max(new_abs, 0), end - one_s))
+            what = 'window start'
+        else:
+            st['i1_abs'] = int(max(new_abs, start + one_s))
+            what = 'window end'
+        st.pop('snug_abs', None)
+        self._say(f'rep {rep_bout[0]} bout {rep_bout[1]}: {what} moved - '
+                  f're-snugging the gait inside it...')
+        self._redraw_block(bi)
+        res = self.blocks[bi]['res']
+        if res is None:
+            self._say(f'rep {rep_bout[0]} bout {rep_bout[1]}: the pipeline '
+                      f'failed for this window - move the line back')
+            return
+        n = len(res['steps']['time'])
+        g0 = (res['t0_abs'] - st.get('i0_abs', start)) * self.period
+        dur = (res['end_abs'] - res['t0_abs']) * self.period
+        note, _ = _stop_note(res, manual=True)
+        self._say(f'rep {rep_bout[0]} bout {rep_bout[1]}: {n} steps; gait '
+                  f'snugged to start {g0:+.2f} s into your window, lasting '
+                  f"{dur:.1f} s{note}. Press 'save adjustments' to save")
+
     def save(self, _event=None):
         """Save adjusted bouts, replacing existing trial/rep/person entries.
 
@@ -1757,7 +1985,11 @@ class _DraggableTrial:
                 continue
             row = blk['row']
             person = str(row['walker'])[-1]
-            start_s = (st['snug_abs'] * self.period if 'snug_abs' in st
+            # resnug: save the WINDOW (like button presses; snugging is
+            # re-derived from it). Legacy: the pinned gait start.
+            start_s = (st['i0_abs'] * self.period
+                       if self.resnug and 'i0_abs' in st else
+                       st['snug_abs'] * self.period if 'snug_abs' in st
                        else float(row['start_s']))
             stop_s = (st['i1_abs'] * self.period if 'i1_abs' in st
                       else float(row['stop_s']))
@@ -1809,7 +2041,7 @@ def interactive_inspect_trial(feet, aligned, trial, session_tag='',
                                     imu.STEPSPEED_YMAX),
                               initial_separation=0.2,
                               anchor_mode='firstonly', rep=None,
-                              pad_s=5.0, plot_every=1):
+                              pad_s=5.0, plot_every=1, resnug=True):
     """inspect_snipped_trial(), but with DRAGGABLE gait start and bout end.
 
     A foot-speed OVERVIEW sits above the bout blocks: every foot on one
@@ -1864,7 +2096,7 @@ def interactive_inspect_trial(feet, aligned, trial, session_tag='',
         prefix_seconds=prefix_seconds, ymax=ymax,
         initial_separation=initial_separation, anchor_mode=anchor_mode,
         pad_s=pad_s, plot_every=plot_every,
-        interactive=True)
+        interactive=True, resnug=resnug)
     pairs = feet_pairs_from_labels(feet)
     period = next(iter(feet.values())).period
     ctrl = _DraggableTrial(fig, feet, pairs, period, blocks, prefix_seconds,
@@ -1872,6 +2104,7 @@ def interactive_inspect_trial(feet, aligned, trial, session_tag='',
                            trial=int(trial), out_csv=out_csv,
                            session_tag=session_tag)
     ctrl.plot_every = plot_every
+    ctrl.resnug = resnug
     # Matplotlib callbacks use weak references; the figure owns its editor.
     fig._rescore_controller = ctrl
     if mode == 'script':
@@ -2422,15 +2655,23 @@ def delete_manual_windows(csv_path, pairs):
     return int(drop.sum())
 
 
-def corrected_alignment(feet, auto_aligned, rescore_csv, cache=None):
+def corrected_alignment(feet, auto_aligned, rescore_csv, cache=None,
+                        resnug=True):
     """The automatic table with every saved manual correction applied.
 
-    apply_manual_rescore() + refresh_manual_distances(): corrected windows,
-    remeasured distances, a boolean 'manual' column. `auto_aligned` is not
-    modified. With no corrections saved it is a copy of the automatic table.
+    apply_manual_rescore() + refresh_manual_distances() + add_gait_timing():
+    corrected windows, remeasured distances, a boolean 'manual' column, and
+    gait_start_s/gait_end_s/gait_duration_s. By default (resnug=True) a
+    manual window is snugged exactly like an automatic bout's button presses,
+    so timing is comparable across both - this also re-snugs corrections
+    saved before re-snugging existed. resnug=False keeps each manual window
+    as the gait itself. Automatic rows keep their timing (computed here only
+    if the table has none yet). `auto_aligned` is not modified.
     """
-    return refresh_manual_distances(
+    out = refresh_manual_distances(
         feet, apply_manual_rescore(auto_aligned, rescore_csv), cache=cache)
+    only = None if 'gait_start_s' not in auto_aligned else out['manual']
+    return add_gait_timing(feet, out, only=only, resnug=resnug, cache=cache)
 
 
 def manual_changes(auto_aligned, corrected):
@@ -2442,6 +2683,14 @@ def manual_changes(auto_aligned, corrected):
     out = corrected.loc[corrected['manual'], cols].copy()
     out['automatic_m'] = auto_aligned.loc[out.index, 'measured_m']
     out['change_m'] = out['measured_m'] - out['automatic_m']
+    if 'gait_duration_s' in corrected:      # snugged gait timing, both tables
+        out['gait_start_s'] = corrected.loc[out.index, 'gait_start_s']
+        out['gait_duration_s'] = corrected.loc[out.index, 'gait_duration_s']
+        out['automatic_gait_s'] = (auto_aligned.loc[out.index, 'gait_duration_s']
+                                   if 'gait_duration_s' in auto_aligned
+                                   else np.nan)
+    if 'stop_found' in corrected:
+        out['stop_found'] = corrected.loc[out.index, 'stop_found']
     return out
 
 
@@ -2469,15 +2718,20 @@ class ManualScoring:
     Opening a (trial, rep) that already has saved corrections asks first
     (see `on_existing`), since rerunning a cell usually means "I'm done with
     these", not "score them again".
+
+    resnug=True (default): a manual window is treated like button presses -
+    the gait start/end are snugged inside it exactly as for automatic bouts
+    (snugged_bout), in the table, the figures and the drag editor.
     """
 
     ON_EXISTING = ('ask', 'skip', 'rescore', 'clear')
 
     def __init__(self, feet, auto_aligned, rescore_csv, manual_aligned_csv,
-                 session_tag, previous=None):
+                 session_tag, previous=None, resnug=True):
         if previous is not None:        # re-created: save + close its editors
             previous.close_editors()
         self.feet, self.auto = feet, auto_aligned
+        self.resnug = resnug
         self.rescore_csv, self.manual_aligned_csv = (rescore_csv,
                                                      manual_aligned_csv)
         self.session_tag = session_tag
@@ -2513,7 +2767,8 @@ class ManualScoring:
     def sync(self, trials=()):
         """Re-apply the corrections file; rewrite the table + `trials`' figures."""
         self.corrected = corrected_alignment(self.feet, self.auto,
-                                             self.rescore_csv, cache=self._cache)
+                                             self.rescore_csv, cache=self._cache,
+                                             resnug=self.resnug)
         self.corrected.to_csv(self.manual_aligned_csv, index=False)
         c = self.corrected
         manual = {(int(t), int(r)) for t, r in
@@ -2525,6 +2780,7 @@ class ManualScoring:
                 path = self.figure_path(trial, rep)
                 if (int(trial), rep) in manual:
                     save_trial_figures(self.feet, c, self.session_tag,
+                                       resnug=self.resnug,
                                        suffix='viz_manual',
                                        trials=[(trial, rep)])
                 elif os.path.exists(path):  # corrections cleared
@@ -2625,7 +2881,8 @@ class ManualScoring:
         """Open the draggable inspector for each (trial, rep)."""
         return self._open(pairs, lambda t, r: [interactive_inspect_trial(
             self.feet, self.corrected, trial=t, rep=r,
-            session_tag=self.session_tag, out_csv=self.rescore_csv, **kwargs)],
+            session_tag=self.session_tag, out_csv=self.rescore_csv,
+            resnug=self.resnug, **kwargs)],
             on_existing)
 
     def click(self, pairs, on_existing='ask', **kwargs):

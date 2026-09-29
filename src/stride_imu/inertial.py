@@ -1405,28 +1405,59 @@ def snug_start(left_info: 'FootTrajectory', right_info: 'FootTrajectory',
 
 def snug_end(left_info: 'FootTrajectory', right_info: 'FootTrajectory',
              high: float = DEFAULT_START_FOOTSPEED_HIGH,
-             low: float = DEFAULT_START_FOOTSPEED_LOW) -> Tuple[Optional[int], Optional[str]]:
+             low: float = DEFAULT_START_FOOTSPEED_LOW,
+             limit: Optional[int] = None) -> Tuple[Optional[int], Optional[str]]:
     """Reverse of snug_start: last committed swing, then its settling valley.
 
     Returns an inclusive sample index and foot, or (None, None) when neither
     foot reaches high. Follow the last high crossing forward until speed is
     at/below low or rises again from a local minimum. It cannot recover a
     landing outside the supplied recording window.
+
+    limit: the window's last sample, when the trajectories run PAST it (the
+    caller mechanized a little beyond the window so a swing in progress at the
+    window edge is not truncated into a fake landing). Only swings whose
+    settling valley is at/before `limit` count - i.e. the gait ends at the
+    last landing COMPLETED inside the window. None = the historic rule on the
+    whole trajectory.
     """
-    last = None
-    for foot, speed in (('left', left_info.Vm), ('right', right_info.Vm)):
-        crossings = np.flatnonzero(speed >= high)
-        if crossings.size and (last is None or crossings[-1] > last[0]):
-            last = (int(crossings[-1]), foot)
-    if last is None:
-        return None, None
-    i, foot = last
-    speed = left_info.Vm if foot == 'left' else right_info.Vm
-    while i < len(speed) - 1:
-        if speed[i] <= low or speed[i + 1] > speed[i]:
-            break
-        i += 1
-    return i, foot
+    speeds = (('left', left_info.Vm), ('right', right_info.Vm))
+
+    def settle(speed, i):
+        while i < len(speed) - 1:
+            if speed[i] <= low or speed[i + 1] > speed[i]:
+                break
+            i += 1
+        return i
+
+    if limit is None:
+        last = None
+        for foot, speed in speeds:
+            crossings = np.flatnonzero(speed >= high)
+            if crossings.size and (last is None or crossings[-1] > last[0]):
+                last = (int(crossings[-1]), foot)
+        if last is None:
+            return None, None
+        i, foot = last
+        return settle(left_info.Vm if foot == 'left' else right_info.Vm, i), foot
+
+    best = None
+    for foot, speed in speeds:
+        hi = np.flatnonzero(speed >= high)
+        if not hi.size:
+            continue
+        # each swing = a run of >=high samples; its landing = settle() from
+        # the run's last sample. Latest landing inside the window wins.
+        run_ends = hi[np.r_[np.diff(hi) > 1, True]]
+        for end in run_ends[::-1]:
+            if end > limit:
+                continue
+            v = settle(speed, int(end))
+            if v <= limit:
+                if best is None or v > best[0]:
+                    best = (v, foot)
+                break
+    return best if best is not None else (None, None)
 
 
 def _common_frame(left_info: 'FootTrajectory', right_info: 'FootTrajectory', period: float,

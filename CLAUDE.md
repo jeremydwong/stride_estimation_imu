@@ -839,3 +839,87 @@ still misbehaves it is a separate issue (need its error text).
   (bout, person, new window), a WARNING if any saved row matched no bout, and
   a before/after table (auto vs manual window + distance, expected). Verified
   via nbconvert with a normal, a recovered-missed, and an unmatchable row.
+
+### 2026-09-28 — manual windows are snugged like button presses (consistent timing)
+
+- **`snugged_bout(pairs, subject, i0, i1, period, manual, resnug, ...)`** —
+  THE snugging decision, factored in front of bout_sync_strides_steps and
+  used by the figures (`_render_inspect_block`), the drag editor and the
+  table. resnug=True (default): [i0, i1] is only the SEARCH window, exactly
+  like Start/Stop presses — snug_start/snug_end find the gait inside it, for
+  automatic AND manual bouts. resnug=False = legacy: a manual window IS the
+  gait (start pinned, end untrimmed).
+- **`add_gait_timing(feet, aligned, only=, resnug=, cache=)`** — new table
+  columns gait_start_s / gait_end_s / gait_duration_s (session s) from
+  snugged_bout; the figures' t=0 and end use the same numbers. s07_s08: 189
+  bouts in 13.5 s, 0 failures, median gait 6.2 s. Notebook C adds them right
+  after the protocol walker fix.
+- `corrected_alignment(..., resnug=True)` re-snugs manual rows (and computes
+  all rows if the automatic table has no gait columns yet), so LOADED old
+  corrections are re-snugged by default. `manual_changes` reports gait start
+  / duration + automatic_gait_s.
+- Drag editor with resnug: green/purple drags move the WINDOW edges
+  (state i0_abs/i1_abs); the gait re-snugs inside and the lines land on the
+  snugged bounds; Save writes the window (not the snugged t0). Legacy path
+  kept for resnug=False. End label reads "Snug end" unless legacy.
+- `ManualScoring(resnug=)` threads it to the table, figure exports and the
+  drag editor. Notebook G0: `RESNUG_MANUAL = True`, passed in G0-load, G1
+  and H; G0 table shows auto vs manual gait duration.
+- Verified on real data: a manual window equal to the press window now gives
+  IDENTICAL gait timing to the automatic bout (10.98 s; legacy gave 10.49 s);
+  an old-style saved correction re-snugs (1762.80 -> 1763.14 s); a drag's
+  saved window reproduces the displayed gait exactly; G0-load + H end to end
+  via nbconvert. Cached CSVs/figures are stale until the notebook is rerun.
+
+### 2026-09-29 — snug_end fix: end = last landing COMPLETED inside the window
+
+- User: after dragging the end, shouldn't the snug end move? It did, but
+  only ~0.2 s before every drop regardless of gait phase. Cause: the
+  mechanization stopped AT the window edge, so a swing in progress there was
+  truncated into a fake settling valley; snug_end took it as the landing.
+  Checked against the uncut trajectory: 3/6 mid-walk drops put the "end"
+  where a foot was really swinging at 1.4-2.6 m/s.
+- Fix (shared engine, so automatic bouts too): bout_sync_strides_steps
+  mechanizes `END_LOOKAHEAD_S` (1 s) past the window just to find the end,
+  and `imu.snug_end(..., limit=)` takes the latest swing whose settling
+  valley is at/before the window's last sample (limit=None = historic rule,
+  kept for other callers/tests). Then the bout is re-run on the trimmed
+  window as before.
+- Now: drag ends land 0.02-0.19 s before the last real touchdown (the <=0.2
+  m/s valley precedes the stance marker; same rule as auto). Automatic bouts:
+  gait start unchanged on all 189; gait end unchanged on 163, 26 moved - most
+  <=0.05 s (recompute noise); the real moves (-0.2..-2.1 s) are all bouts
+  whose old end sat within 0.01-0.09 s of the Stop press (walker still
+  moving/shuffling at the press), e.g. t1 r2 b2: last step landed ~2 s before
+  the press, then standing + a turn-start shuffle at the press — the old end
+  counted 2 s of standing. Manual==auto identity and table==figure still
+  hold. add_gait_timing now ~22 s/session. Tests: SnugEndLimitTests.
+
+### 2026-09-29 (later) — stop check after the gait end; extend automatic windows only
+
+- User concern: the snugged end assumes the window contains a true stop.
+  `stop_after(feet, subject, end_abs, period)`: both feet raw-still (|gyro| <
+  STILL_RAD_S = 0.35 rad/s, as walk onset) for STOP_HOLD_S, starting within
+  STOP_SEARCH_S (1.5 s) of the end. Raw gyro only (reads past any window).
+  STOP_HOLD_S calibrated to 0.25 s: mid-walk, both feet are essentially never
+  still together even 0.15 s (132/151 windows; the 19 exceptions are real
+  pauses >=0.5 s), while hand-off pauses are often 0.25-0.5 s — 0.5 s missed
+  them (139 vs 161 stops found).
+- snugged_bout: AUTOMATIC bouts whose end is still the Stop press and show no
+  stop are re-snugged with the window +1 s at a time up to STOP_EXTEND_MAX_S
+  (3 s); if none is found the ORIGINAL press-window result is kept (never the
+  most-extended one) and flagged. Manual/dragged ends are NEVER extended
+  (user: the scientist's judgement stands when subjects didn't stay still) —
+  only flagged. snug_end only ever moves the end BACKWARD from the window end.
+- Result dict + add_gait_timing: `stop_found`, `end_extended_s` (and
+  `stop_searched_s` in the dict). s07_s08: 163 stop at the press, 18 found
+  after extending (11 at +1 s), 8 no stop (kept at the press). 13/18 extended
+  had the walker mid-swing within 0.5 s of the press (press came early); a
+  few long ones (e.g. t36 r2 b2 +2.8 s, 8 swings) may have run into
+  post-hand-off turn steps — speed can't tell turning from walking; they're
+  listed for review.
+- Figures: the |A| note says "window extended +N s to find the stop" or, in
+  red, "NO clear stop ... - check the end" (manual: "your end used as is").
+  Drag status line too. Notebook: config `STOP_EXTEND_MAX_S` (set on the
+  module; re-applied after G1's importlib.reload), C prints counts + the list
+  of bouts to check, G0/H tables show stop_found. Tests: StopAfterTests.

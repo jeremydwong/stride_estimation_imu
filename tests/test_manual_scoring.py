@@ -31,7 +31,7 @@ class ManualScoringTests(unittest.TestCase):
             walker=['left_foot_a'] * 2, start_s=[10., 30.], stop_s=[16., 36.],
             duration_s=[6., 6.], distance_m=[5., 5.], measured_m=[5., 5.],
             distance_error_m=[0., 0.], snip=[0., 1.]))
-        feet = {'left_foot_a': SimpleNamespace(file_path=str(d / 'x.h5'))}
+        feet = {'left_foot_a': SimpleNamespace(file_path=str(d / 'x.h5'), period=0.01)}
         self.figs = []
         patches = [
             patch.object(bf, 'snip_distances', side_effect=lambda rec, w, **k:
