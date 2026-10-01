@@ -923,3 +923,38 @@ still misbehaves it is a separate issue (need its error text).
   Drag status line too. Notebook: config `STOP_EXTEND_MAX_S` (set on the
   module; re-applied after G1's importlib.reload), C prints counts + the list
   of bouts to check, G0/H tables show stop_found. Tests: StopAfterTests.
+
+### 2026-10-01 — student feedback on section G (s07_s08 notebook)
+
+- **G2/G3 "runs forever" = the input() prompt** in ManualScoring for trials with
+  saved corrections (VS Code shows it as an easy-to-miss box). Prompt REMOVED:
+  default `on_existing='rescore'` reopens showing the saved windows (fix again
+  any number of times; Save replaces only the person changed — "fixed A, forgot
+  B" works). 'ask' is accepted as an alias. New `scoring.clear(pairs)` and
+  `scoring.clear_all()` (renames RESCORE_CSV to .bak-<date>, removes this
+  session's _viz_manual.svg). Notebook G0 `START_FRESH` switch; G markdown
+  explains the clean state (automatic table never touched by manual scoring).
+- **Missed trial 1 was placed ON trial 2 in G3**: assign_bout_times used
+  np.interp, which clamps outside the matched range. Edge missed bouts are now
+  extrapolated by the median per-bout spacing (s07_s08 trial 1 r1: ~823/856 s
+  vs trial 2 at 889 s). G3 figure now shows the target distance, other
+  trials' bouts grey + labelled, Start/Stop presses, and the missed bout's
+  ESTIMATED position (red dashed).
+- **Distance shown vs drawn**: titles printed measured_m (alignment feature =
+  single-foot max excursion over the padded button window) — never updated by
+  a drag and not what the overhead draws. New `imu.overhead_travel(res)` =
+  walked distance AS DRAWN (snugged gait, mean of both feet, gait start ->
+  FARTHEST footfall); titles show "target / walked (as drawn) / snip max" and
+  update on every drag; overheads get a dashed target line; add_gait_timing
+  adds `walked_m` + `came_back`; manual_changes reports both.
+- **Overhead flipped / collapsed on out-and-back windows** (likely the
+  students' "funky" trials): each foot was aimed at its LAST footfall; when the
+  window contains a turn + walk back, that is near the start. Now aimed at the
+  FARTHEST footfall (identical for straight walks). `came_back` flags these
+  (title red): 17/189 bouts in s07_s08, e.g. trial 8 r1 b2.
+- The two overhead panels per bout are labelled "true scale" / "same walk,
+  lateral stretched" (students read ±1 m vs ±2 m as approach vs return).
+- s07_s08 after the fixes: measured_m − walked_m median 0.14 m, >1 m on 8/189.
+  Cached CSVs/figures in Dropbox are stale until the notebook is rerun (C, E, F).
+- Students' trial 7 r1 (8.4 m) / trial 12 r1 numbers do NOT match s07_s08
+  (13.1 m / clean) — they are on another session; not reproduced.

@@ -228,7 +228,59 @@ def draw_step_speed(ax, data, ymax=STEPSPEED_YMAX):
     ax.grid(alpha=0.3)
 
 
-def draw_overhead(ax, data, lat_lim=1.0, equal=False, legend=True):
+def _overhead_span(data, side):
+    """(xy, gi, end_i, last_i) for one foot exactly as the overhead uses it:
+    the common-frame [lateral, forward] track, the snug-start sample, the
+    foot's FARTHEST walking footfall from the start (end of the outbound
+    walk), and its last footfall. For a straight walk end_i == last_i; when
+    the window also contains a turn and a walk back, aiming at the farthest
+    footfall keeps the drawing upright (aiming at the last one flipped the
+    foot and collapsed the distance). Fallback: last sample. None if no
+    track."""
+    steps = data['steps']
+    xyz = steps.get(f'{side}_xyz')
+    if xyz is None or not len(xyz):
+        return None
+    xy = xyz[:, :2].astype(float)
+    snap = steps.get('start_snap')
+    g = int(snap) if snap is not None else 0
+    gi = g if 0 <= g < len(xy) else 0
+    ff = data['sides'][side].get('ff_idx')
+    ff = np.asarray(ff, int) if ff is not None else np.zeros(0, int)
+    ff = ff[(ff >= gi) & (ff < len(xy))]
+    if not len(ff):
+        return xy, gi, len(xy) - 1, len(xy) - 1
+    dist = np.hypot(*(xy[ff] - xy[gi]).T)
+    return xy, gi, int(ff[np.argmax(dist)]), int(ff[-1])
+
+
+def overhead_travel(data):
+    """Walked distance AS THE OVERHEAD DRAWS IT: each foot's horizontal
+    displacement from the snug gait start to its last walking footfall
+    (= that foot's final forward Y in the figure). Returns
+    {'left': m, 'right': m, 'mean': m, 'came_back': bool}; NaN where a foot
+    has no track. The mean of the two feet is the bout's walked distance
+    (to the farthest footfall). came_back = the window also holds a walk
+    back after a turn (last footfall < 70% of the farthest, on average) -
+    usually the bout end should be moved earlier."""
+    out, back = {}, []
+    for side in ('left', 'right'):
+        span = _overhead_span(data, side)
+        if span is None:
+            out[side] = np.nan
+            continue
+        xy, gi, end_i, last_i = span
+        out[side] = float(np.hypot(*(xy[end_i] - xy[gi])))
+        back.append(float(np.hypot(*(xy[last_i] - xy[gi]))))
+    vals = [v for v in (out['left'], out['right']) if np.isfinite(v)]
+    out['mean'] = float(np.mean(vals)) if vals else np.nan
+    out['came_back'] = bool(vals and np.mean(back) < 0.7 * out['mean']
+                            and out['mean'] > 1.0)
+    return out
+
+
+def draw_overhead(ax, data, lat_lim=1.0, equal=False, legend=True,
+                  expected_m=None):
     """Top-down foot-position map. Each foot is rotated INDEPENDENTLY so its
     OWN direction of travel — from the snug gait start to its last walking
     contact — points straight up +Y. This is a final, visualization-only rotation
@@ -246,7 +298,9 @@ def draw_overhead(ax, data, lat_lim=1.0, equal=False, legend=True):
     lat_lim: fixed lateral half-range in metres (cross-trial comparable).
     equal: draw at equal x/y scale (adjustable='box' — the axes box narrows to
     the data's true aspect, so walking tracks appear at honest proportions).
-    Y runs from the start (~0) up to 1.10x the furthest forward point."""
+    expected_m: the trial's target distance, drawn as a dashed line.
+    Y runs from the start (~0) up to 1.10x the furthest forward point (or the
+    target, whichever is further)."""
     steps = data['steps']
     snap, sfoot = steps.get('start_snap'), steps.get('start_snap_foot')
     sep = float(data.get('initial_separation', 0.2))
@@ -254,15 +308,12 @@ def draw_overhead(ax, data, lat_lim=1.0, equal=False, legend=True):
     sign = {'left': -1.0, 'right': +1.0}          # left drawn left, right drawn right
     fy_all = []
     for side in ['left', 'right']:
-        xyz = steps.get(f'{side}_xyz')
-        if xyz is None or not len(xyz):
+        span = _overhead_span(data, side)         # [lateral, forward] common frame
+        if span is None:
             continue
-        xy = xyz[:, :2].astype(float)             # [lateral, forward] in common frame
-        gi = g if 0 <= g < len(xy) else 0
-        start = xy[gi].copy()
-        # end of travel = this foot's last walking footfall (fall back: last sample)
+        xy, gi, end_i, _ = span                   # end = farthest walking footfall
         ff = data['sides'][side].get('ff_idx')
-        end_i = int(ff[-1]) if (ff is not None and len(ff)) else len(xy) - 1
+        start = xy[gi].copy()
         d = xy[end_i] - start
         # rotate about the snug start so d (start->end) points +Y, then offset the
         # start to (+/- sep/2, 0): forward Y=0 at gait start, feet sep apart.
@@ -289,9 +340,14 @@ def draw_overhead(ax, data, lat_lim=1.0, equal=False, legend=True):
             ax.plot(rx[gi], ry[gi], 'P', color='tab:green', ms=10, mec='k',
                     mew=0.5, ls='None', label='snug start')
     ax.axvline(0, color='gray', lw=0.5, ls=':', alpha=0.5)
+    if expected_m is not None and np.isfinite(expected_m):
+        ax.axhline(expected_m, color='0.25', lw=1.0, ls='--', zorder=0,
+                   label=f'target {expected_m:g} m')
     ax.set_xlim(-lat_lim, lat_lim)          # fixed for cross-trial comparison
     if fy_all:
         ymax = max(float(f.max()) for f in fy_all)
+        if expected_m is not None and np.isfinite(expected_m):
+            ymax = max(ymax, float(expected_m))
         ymin = min(float(f.min()) for f in fy_all)
         ax.set_ylim(min(0.0, ymin), ymax * 1.10)     # start (~0) up to 1.10x furthest
     if equal:
@@ -318,13 +374,19 @@ def make_bout_axes(fig, subspec):
     return ax_over_eq, ax_over_wide, ax_acc, ax_vel, ax_step
 
 
-def draw_bout_block(axes5, data, ymax=(ACCEL_YMAX, FOOTSPEED_YMAX, STEPSPEED_YMAX)):
-    """Fill one bout's axes (from make_bout_axes) — two overheads (equal-scale
-    and ±2 m wide) + accel/|V|/step.
-    ymax = (accel, foot speed, step speed) y-axis ceilings."""
+def draw_bout_block(axes5, data, ymax=(ACCEL_YMAX, FOOTSPEED_YMAX, STEPSPEED_YMAX),
+                    expected_m=None):
+    """Fill one bout's axes (from make_bout_axes) — the SAME walk drawn twice
+    (true scale ±1 m, and lateral stretched ±2 m), then accel/|V|/step.
+    ymax = (accel, foot speed, step speed) y-axis ceilings; expected_m = the
+    trial's target distance (dashed line on both overheads)."""
     ax_over_eq, ax_over_wide, ax_acc, ax_vel, ax_step = axes5
-    draw_overhead(ax_over_eq, data, lat_lim=1.0, equal=True, legend=False)
-    draw_overhead(ax_over_wide, data, lat_lim=2.0)
+    draw_overhead(ax_over_eq, data, lat_lim=1.0, equal=True, legend=False,
+                  expected_m=expected_m)
+    draw_overhead(ax_over_wide, data, lat_lim=2.0, expected_m=expected_m)
+    # both panels show the same bout - say so (they read as approach/return)
+    ax_over_eq.set_title('true scale', fontsize=8, color='0.3')
+    ax_over_wide.set_title('same walk, lateral stretched', fontsize=8, color='0.3')
     ax_over_wide.set_ylabel(None)             # keep the y story on the left one
     draw_accel(ax_acc, data, ymax[0], legend=False)
     draw_velocity(ax_vel, data, ymax[1], legend=False)
@@ -359,7 +421,11 @@ def assign_bout_times(aligned):
 
     Matched bouts sit at their snip midpoint. Missed bouts have no snip, so
     their time is linearly interpolated over the expected-bout sequence index
-    from the matched neighbours either side. Returns (time_s, is_missed).
+    from the matched neighbours either side. Missed bouts BEFORE the first
+    (or after the last) matched one are extrapolated by the typical spacing
+    per bout (median over consecutive matched bouts) - plain interpolation
+    clamps them onto the first matched bout, which put a missed trial 1 on
+    top of trial 2. Returns (time_s, is_missed).
     """
     seq = np.arange(len(aligned), dtype=float)
     mid = (aligned['start_s'].to_numpy(float) + aligned['stop_s'].to_numpy(float)) / 2
@@ -367,6 +433,14 @@ def assign_bout_times(aligned):
     time_s = mid.copy()
     if ok.any():
         time_s[~ok] = np.interp(seq[~ok], seq[ok], mid[ok])
+        so, mo = seq[ok], mid[ok]
+        if len(so) >= 2:
+            per_bout = np.diff(mo) / np.diff(so)
+            spacing = float(np.median(per_bout[per_bout > 0])) if (per_bout > 0).any() else 0.0
+            before = ~ok & (seq < so[0])
+            after = ~ok & (seq > so[-1])
+            time_s[before] = mo[0] - (so[0] - seq[before]) * spacing
+            time_s[after] = mo[-1] + (seq[after] - so[-1]) * spacing
     return time_s, ~ok
 
 

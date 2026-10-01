@@ -1117,8 +1117,13 @@ def snugged_bout(pairs, subject, i0, i1, period, manual=False, resnug=True,
 
 def add_gait_timing(feet, aligned, only=None, resnug=True, cache=None):
     """Add gait_start_s / gait_end_s / gait_duration_s from the snugged bouts,
-    plus stop_found (a true stop follows the gait end) and end_extended_s
-    (how far an automatic window had to be extended to find it; 0 = none).
+    plus stop_found (a true stop follows the gait end), end_extended_s
+    (how far an automatic window had to be extended to find it; 0 = none) and
+    walked_m: the walked distance exactly as the inspection figures draw it
+    (snugged gait, mean of both feet, gait start -> farthest footfall), and
+    came_back (the window also contains a walk back after a turn). Compare
+    walked_m with the target distance_m; measured_m is the alignment's padded
+    max excursion and runs larger.
 
     For every matched bout (or only the rows where boolean `only` is True),
     runs snugged_bout() on its [start_s, stop_s] window with the walker's
@@ -1129,11 +1134,12 @@ def add_gait_timing(feet, aligned, only=None, resnug=True, cache=None):
     """
     out = aligned.copy()
     for col in ('gait_start_s', 'gait_end_s', 'gait_duration_s',
-                'end_extended_s'):
+                'end_extended_s', 'walked_m'):
         if col not in out:
             out[col] = np.nan
-    if 'stop_found' not in out:
-        out['stop_found'] = pd.Series(pd.NA, index=out.index, dtype='boolean')
+    for col in ('stop_found', 'came_back'):
+        if col not in out:
+            out[col] = pd.Series(pd.NA, index=out.index, dtype='boolean')
     pairs = feet_pairs_from_labels(feet)
     period = next(iter(feet.values())).period
     sel = out['start_s'].notna() & out['stop_s'].notna()
@@ -1143,12 +1149,13 @@ def add_gait_timing(feet, aligned, only=None, resnug=True, cache=None):
         row = out.loc[idx]
         person = str(row['walker']).rsplit('_', 1)[-1]
         manual = bool(row.get('manual', False) == True)
-        key = ('gait', person, float(row['start_s']), float(row['stop_s']),
+        key = ('gait2', person, float(row['start_s']), float(row['stop_s']),
                manual, resnug)
         if cache is not None and key in cache:
-            g0, g1, stop, ext = cache[key]
+            g0, g1, stop, ext, walked, came_back = cache[key]
         else:
-            g0 = g1 = ext = np.nan
+            g0 = g1 = ext = walked = np.nan
+            came_back = pd.NA
             stop = pd.NA
             subject = {'a': 's1', 'b': 's2'}.get(person)
             if subject and (subject, 'left') in pairs and (subject, 'right') in pairs:
@@ -1160,12 +1167,15 @@ def add_gait_timing(feet, aligned, only=None, resnug=True, cache=None):
                                          manual=manual, resnug=resnug)
                     g0, g1 = r['t0_abs'] * period, r['end_abs'] * period
                     stop, ext = bool(r['stop_found']), float(r['end_extended_s'])
+                    travel = imu.overhead_travel(r)
+                    walked, came_back = travel['mean'], travel['came_back']
                 except Exception:
                     pass
             if cache is not None:
-                cache[key] = (g0, g1, stop, ext)
+                cache[key] = (g0, g1, stop, ext, walked, came_back)
         out.loc[idx, ['gait_start_s', 'gait_end_s', 'gait_duration_s',
-                      'end_extended_s']] = (g0, g1, g1 - g0, ext)
+                      'end_extended_s', 'walked_m']] = (g0, g1, g1 - g0, ext, walked)
+        out.loc[idx, 'came_back'] = came_back
         out.loc[idx, 'stop_found'] = stop
     return out
 
@@ -1183,6 +1193,23 @@ def _stop_note(res, manual=False):
     return (f'; NO clear stop' + (f' (searched +{searched:.0f} s past the '
                                   f'press; end kept at the press)' if searched
                                   else '') + ' - check the end', True)
+
+
+def _bout_title(row, walked_m=None, came_back=False):
+    """Bout block title: target vs the walked distance AS DRAWN (snugged gait,
+    mean of both feet, start -> last footfall), plus the alignment's 'snip
+    max' (largest single-foot excursion over the padded button window - the
+    number used to match snips to trials; it includes pre/post-walk motion
+    and drift, so it is usually larger than the drawn walk)."""
+    txt = (f"rep {int(row['rep'])} bout {int(row['bout'])}: {row['walker']} "
+           f"walks - target {row['distance_m']:.1f} m")
+    if walked_m is not None and np.isfinite(walked_m):
+        txt += f", walked {walked_m:.1f} m (as drawn)"
+    if came_back:
+        txt += ' [walked back after a turn - check the end]'
+    if pd.notna(row.get('measured_m')):
+        txt += f", snip max {row['measured_m']:.1f} m"
+    return txt + (' [inferred stop]' if row.get('inferred') else '')
 
 
 def _render_inspect_block(axes5, feet, pairs, row, period,
@@ -1207,10 +1234,7 @@ def _render_inspect_block(axes5, feet, pairs, row, period,
             ch.remove()                   # stale secondary (sample-index) axes
         ax.clear()
     subject = 's1' if str(row['walker']).endswith('a') else 's2'
-    title = (f"rep {int(row['rep'])} bout {int(row['bout'])}: "
-             f"{row['walker']} walks - expected {row['distance_m']:.1f} m, "
-             f"measured {row['measured_m']:.1f} m"
-             + (' [inferred stop]' if row.get('inferred') else ''))
+    title = _bout_title(row)
     # Anchor the title to the BLOCK top, not the equal-scale overhead's: for a
     # short walk that panel shrinks vertically (aspect='equal') and its title
     # sank mid-block, hidden under the wide overhead. x = narrow panel's left,
@@ -1219,7 +1243,7 @@ def _render_inspect_block(axes5, feet, pairs, row, period,
     import matplotlib.transforms as mtransforms
     anchor = mtransforms.blended_transform_factory(axes5[0].transAxes,
                                                    axes5[1].transAxes)
-    axes5[1].text(0, 1, title, fontsize=10, fontweight='bold', ha='left',
+    title_artist = axes5[1].text(0, 1, title, fontsize=10, fontweight='bold', ha='left',
                   va='bottom', clip_on=False,
                   transform=anchor + mtransforms.ScaledTranslation(
                       0, 34 / 72, axes5[1].figure.dpi_scale_trans))
@@ -1236,7 +1260,15 @@ def _render_inspect_block(axes5, feet, pairs, row, period,
                            end_overridden=i1_abs is not None,
                            initial_separation=initial_separation,
                            anchor_mode=anchor_mode)
-        imu.draw_bout_block(axes5, res, ymax=ymax)
+        expected = float(row['distance_m']) if pd.notna(row.get('distance_m')) else None
+        imu.draw_bout_block(axes5, res, ymax=ymax, expected_m=expected)
+        # the walked distance of THIS drawing (updates on every drag/redraw)
+        travel = imu.overhead_travel(res)
+        res['walked_m'], res['came_back'] = travel['mean'], travel['came_back']
+        title_artist.set_text(_bout_title(row, walked_m=res['walked_m'],
+                                          came_back=res['came_back']))
+        if res['came_back']:
+            title_artist.set_color('tab:red')
 
         ax_acc = axes5[2]
         t0_abs = res['t0_abs']            # absolute sample at t=0 (snug)
@@ -2251,8 +2283,11 @@ class _RescoreFigure:
     on_save = None    # ManualScoring hook: called with the trial after a save
 
     def __init__(self, fig, axes, trial, rep, rows, out_csv, session_tag,
-                 feet, period, n_samples, window, plot_every=1):
+                 feet, period, n_samples, window, plot_every=1, context=None):
         self.fig, self.axes = fig, axes
+        # orientation aids (see _draw_context): target distance, the other
+        # trials' bouts, button presses, estimated position of missed bouts
+        self.context = context or {}
         self.trial, self.rep = trial, rep
         self.rows = rows                       # person -> (start_s, stop_s) or None
         self.out_csv, self.session_tag = out_csv, session_tag
@@ -2315,6 +2350,7 @@ class _RescoreFigure:
         self.axes[2].set_ylabel('horiz. excursion [m]')
         self.axes[2].set_xlabel('session time [s]')
         self.axes[0].set_xlim(self.window)
+        self._draw_context()
         for name, val in zip(('from', 'to'), self.window):
             if name in self.boxes:
                 box = self.boxes[name]
@@ -2322,6 +2358,38 @@ class _RescoreFigure:
                 box.set_val(f'{val:.1f}')
                 box.eventson = True
         self._draw_spans()
+
+    def _draw_context(self):
+        """What else is in view, so you can be sure WHICH walk you score:
+        dashed target distance on the excursion panel; every OTHER trial's
+        bout shaded grey and labelled (T2 r1 b1 A); Start/Stop presses as
+        thin green/purple lines; a missed bout's ESTIMATED position (from
+        its neighbours in the trial sequence) as a red dashed line."""
+        ctx, (lo, hi) = self.context, self.window
+        ax0, ax_ex = self.axes[0], self.axes[2]
+        top = ax0.get_xaxis_transform()
+        if ctx.get('target_m') is not None:
+            ax_ex.axhline(ctx['target_m'], color='0.25', ls='--', lw=1.0,
+                          label=f"target {ctx['target_m']:g} m")
+            ax_ex.legend(fontsize=7, loc='upper left')
+        for lab, a, b in ctx.get('others', []):
+            if b < lo or a > hi:
+                continue
+            for ax in self.axes:
+                ax.axvspan(a, b, color='0.5', alpha=0.10, lw=0)
+            ax0.text(max(a, lo), 0.98, lab, transform=top, fontsize=7,
+                     color='0.35', va='top', ha='left', clip_on=True)
+        for t_s, lab in ctx.get('presses', []):
+            if lo <= t_s <= hi:
+                col = '#1a7f37' if lab == 'Start' else '#8250df'
+                for ax in self.axes:
+                    ax.axvline(t_s, color=col, lw=0.7, alpha=0.6)
+        for lab, t_s in ctx.get('estimates', []):
+            if lo <= t_s <= hi:
+                for ax in self.axes:
+                    ax.axvline(t_s, color='tab:red', lw=1.2, ls='--')
+                ax0.text(t_s, 0.85, f' {lab}\n (estimated)', transform=top,
+                         fontsize=7, color='tab:red', va='top')
 
     def on_window_submit(self, _text=None):
         """Enter pressed in a window text field: parse both, redraw."""
@@ -2455,6 +2523,12 @@ def manual_correct(feet, aligned, trials, out_csv='brock_manual_rescore.csv',
     time_s, _missed = imu.assign_bout_times(aligned)
     aligned = aligned.assign(_est_t=time_s)
     typical = np.nanmedian((aligned['stop_s'] - aligned['start_s']).to_numpy(float))
+    presses = []
+    try:                                  # button presses, for orientation
+        ev = load_events(next(iter(feet.values())).file_path)
+        presses = list(zip(ev['time_s'].tolist(), ev['label'].tolist()))
+    except Exception:
+        pass
 
     wanted = []
     for item in trials:
@@ -2490,13 +2564,31 @@ def manual_correct(feet, aligned, trials, out_csv='brock_manual_rescore.csv',
             fig, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True,
                                      dpi=_interactive_dpi(12))
         fig.subplots_adjust(bottom=0.16, hspace=0.08)
-        fig.suptitle(f'{session_tag} trial {trial} rep {rep} - inspect / rescore'
-                     f'   (A blue, B orange; missed bouts have no shading)')
+        fig.suptitle(f'{session_tag} trial {trial} rep {rep} '
+                     f'(target {group["distance_m"].iloc[0]:g} m) - inspect / rescore\n'
+                     f'A blue, B orange; other trials grey + labelled; '
+                     f'missed bouts: red dashed = estimated position; '
+                     f'thin green/purple = Start/Stop presses', fontsize=10)
 
+        def who(w):
+            w = str(w) if pd.notna(w) else ''
+            return w[-1].upper() if w else '?'
+        this = (aligned['trial'] == trial) & (aligned['rep'] == rep)
+        has_win = aligned['start_s'].notna() & aligned['stop_s'].notna()
+        context = {
+            'target_m': float(group['distance_m'].iloc[0]),
+            'others': [(f"T{int(r.trial)} r{int(r.rep)} b{int(r.bout)} {who(r.walker)}",
+                        float(r.start_s), float(r.stop_s))
+                       for r in aligned[~this & has_win].itertuples()],
+            'presses': presses,
+            'estimates': [(f"T{trial} r{rep} b{int(b)}", float(t))
+                          for b, t in zip(group.loc[group['start_s'].isna(), 'bout'],
+                                          group.loc[group['start_s'].isna(), '_est_t'])],
+        }
         ctrl = _RescoreFigure(fig, list(axes), trial, rep, rows, out_csv,
                               session_tag, feet, period, n_samples,
                               window=(lo - pad_s, hi + pad_s),
-                              plot_every=plot_every)
+                              plot_every=plot_every, context=context)
         # buttons + window text fields along the bottom
         slots = [('rescore A', ctrl.arm('a')), ('rescore B', ctrl.arm('b')),
                  ('save', ctrl.save)]
@@ -2677,7 +2769,9 @@ def corrected_alignment(feet, auto_aligned, rescore_csv, cache=None,
 def manual_changes(auto_aligned, corrected):
     """One row per corrected bout: new window/distance next to the automatic one.
 
-    automatic_m is NaN for a missed bout that was recovered by hand.
+    measured_m / automatic_m are the alignment metric (padded max excursion);
+    walked_m / automatic_walked_m are the distance as the figures draw it.
+    automatic_* is NaN for a missed bout that was recovered by hand.
     """
     cols = ['trial', 'rep', 'bout', 'walker', 'start_s', 'stop_s', 'measured_m']
     out = corrected.loc[corrected['manual'], cols].copy()
@@ -2689,6 +2783,10 @@ def manual_changes(auto_aligned, corrected):
         out['automatic_gait_s'] = (auto_aligned.loc[out.index, 'gait_duration_s']
                                    if 'gait_duration_s' in auto_aligned
                                    else np.nan)
+    if 'walked_m' in corrected:            # distance as the figures draw it
+        out['walked_m'] = corrected.loc[out.index, 'walked_m']
+        out['automatic_walked_m'] = (auto_aligned.loc[out.index, 'walked_m']
+                                     if 'walked_m' in auto_aligned else np.nan)
     if 'stop_found' in corrected:
         out['stop_found'] = corrected.loc[out.index, 'stop_found']
     return out
@@ -2715,16 +2813,20 @@ class ManualScoring:
         scoring.drag([(4, 1)])      # draggable gait start / bout end
         scoring.click([(37, 2)])    # click a new start/stop (missed bouts)
 
-    Opening a (trial, rep) that already has saved corrections asks first
-    (see `on_existing`), since rerunning a cell usually means "I'm done with
-    these", not "score them again".
+    Opening a (trial, rep) that already has saved corrections NEVER prompts
+    (an input() box used to block the cell - in VS Code it is easy to miss,
+    so the cell looked like it ran forever). By default the editor opens
+    showing the saved corrections; fix them again as often as you like -
+    Save replaces only the person(s) you changed. `on_existing='clear'`
+    (or scoring.clear(pairs)) puts a rep back to automatic first;
+    scoring.clear_all() starts the whole session from a clean state.
 
     resnug=True (default): a manual window is treated like button presses -
     the gait start/end are snugged inside it exactly as for automatic bouts
     (snugged_bout), in the table, the figures and the drag editor.
     """
 
-    ON_EXISTING = ('ask', 'skip', 'rescore', 'clear')
+    ON_EXISTING = ('rescore', 'skip', 'clear')
 
     def __init__(self, feet, auto_aligned, rescore_csv, manual_aligned_csv,
                  session_tag, previous=None, resnug=True):
@@ -2837,18 +2939,23 @@ class ManualScoring:
         return list(dict.fromkeys(out))
 
     def _resolve_existing(self, pairs, on_existing):
+        if on_existing == 'ask':           # old notebooks: never block on input()
+            on_existing = 'rescore'
         if on_existing not in self.ON_EXISTING:
             raise ValueError(f'on_existing must be one of {self.ON_EXISTING}')
         done = [p for p in pairs if p in self.saved_pairs()]
         if not done:
             return pairs
-        if on_existing == 'ask':
-            print('Already corrected and saved: '
-                  + ', '.join(f'trial {t} rep {r}' for t, r in done))
-            answer = input('[s]kip them (default) / [r]escore from the saved '
-                           'windows / [c]lear them back to automatic and '
-                           'rescore? ').strip().lower()[:1]
-            on_existing = {'r': 'rescore', 'c': 'clear'}.get(answer, 'skip')
+        if on_existing == 'rescore':
+            saved = pd.read_csv(self.rescore_csv)
+            for t, r in done:
+                who = sorted(saved.loc[(saved['trial'] == t) & (saved['rep'] == r),
+                                       'person'].astype(str).str.upper().unique())
+                print(f'trial {t} rep {r}: opening WITH your saved correction(s) '
+                      f'for person {"/".join(who)}. Adjust again and Save to '
+                      f'replace (only the person you change is replaced). To '
+                      f'go back to automatic: scoring.clear([({t}, {r})])')
+            return pairs
         if on_existing == 'skip':
             print('skipping ' + ', '.join(f'{t}:{r}' for t, r in done))
             return [p for p in pairs if p not in done]
@@ -2858,6 +2965,46 @@ class ManualScoring:
             print(f'cleared {n} saved correction(s); reopening from the '
                   f'automatic bounds')
         return pairs
+
+    def clear(self, pairs):
+        """Delete the saved corrections of these (trial, rep) pairs (bare
+        trial numbers = both reps): back to the automatic windows, table and
+        figures updated. Open editors are saved and closed first."""
+        pairs = self._check_pairs(pairs)
+        self.close_editors()
+        n = delete_manual_windows(self.rescore_csv, pairs)
+        self.sync(trials=sorted({t for t, _ in pairs}))
+        print(f'cleared {n} saved correction(s) for '
+              + ', '.join(f'trial {t} rep {r}' for t, r in pairs))
+        return n
+
+    def clear_all(self):
+        """Start from a CLEAN state: no manual edits at all. The corrections
+        file is not deleted but renamed to <name>.bak-<timestamp> (so a
+        mistake can be undone by renaming it back); every _viz_manual.svg is
+        removed. The automatic table (tied only to the raw data and the
+        button presses) is never touched by manual scoring."""
+        import datetime
+        self.close_editors()
+        trials = sorted({t for t, _ in self.saved_pairs()})
+        backup = None
+        if os.path.exists(self.rescore_csv):
+            backup = (f'{self.rescore_csv}.bak-'
+                      f'{datetime.datetime.now():%Y%m%d-%H%M%S}')
+            os.replace(self.rescore_csv, backup)
+        self.sync(trials=trials)
+        removed = 0                       # stale figures (also when the file was
+        if next(iter(self.feet.values())).file_path:   # moved aside already)
+            import glob
+            folder = os.path.dirname(self.figure_path(1, 1))
+            for f in glob.glob(os.path.join(
+                    folder, f'brock_{self.session_tag}_trial*_rep*_viz_manual.svg')):
+                os.remove(f)
+                removed += 1
+        print('clean state: no manual corrections'
+              + (f' (previous corrections kept as {backup})' if backup else '')
+              + (f'; removed {removed} _viz_manual figure(s)' if removed else ''))
+        return backup
 
     def _open(self, pairs, open_one, on_existing):
         pairs = self._check_pairs(pairs)
@@ -2877,7 +3024,7 @@ class ManualScoring:
               f'cell saves these figures\' finished edits first.')
         return self.editors
 
-    def drag(self, pairs, on_existing='ask', **kwargs):
+    def drag(self, pairs, on_existing='rescore', **kwargs):
         """Open the draggable inspector for each (trial, rep)."""
         return self._open(pairs, lambda t, r: [interactive_inspect_trial(
             self.feet, self.corrected, trial=t, rep=r,
@@ -2885,7 +3032,7 @@ class ManualScoring:
             resnug=self.resnug, **kwargs)],
             on_existing)
 
-    def click(self, pairs, on_existing='ask', **kwargs):
+    def click(self, pairs, on_existing='rescore', **kwargs):
         """Open the click-to-rescore figure for each (trial, rep)."""
         return self._open(pairs, lambda t, r: manual_correct(
             self.feet, self.corrected, [(t, r)],

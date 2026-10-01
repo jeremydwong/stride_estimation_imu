@@ -1,4 +1,4 @@
-"""ManualScoring: every save rewrites the corrected table; reruns ask first."""
+"""ManualScoring: every save rewrites the corrected table; reruns never prompt."""
 import os
 os.environ.setdefault('MPLBACKEND', 'Agg')
 import tempfile
@@ -48,7 +48,7 @@ class ManualScoringTests(unittest.TestCase):
         def opener(t, r):
             self.opened.append((t, r))
             return [FakeEditor(self.s, t, r, start=11. + len(self.opened))]
-        self.open = lambda pairs, on_existing='ask': self.s._open(
+        self.open = lambda pairs, on_existing='rescore': self.s._open(
             pairs, opener, on_existing)
 
     def tearDown(self):
@@ -64,24 +64,34 @@ class ManualScoringTests(unittest.TestCase):
         self.assertIn('table + trial 4 figure(s) updated', ed.note)
         pd.testing.assert_frame_equal(self.s.auto, self.auto)
 
-    def test_rerun_saves_open_editors_then_asks_about_saved_pairs(self):
+    def test_rerun_saves_open_editors_and_reopens_saved_pairs_without_prompt(self):
         self.open([(4, 1)])                       # edited but Save not pressed
-        with patch('builtins.input', return_value='') as ask:
-            self.open([(4, 1), (4, 2)])           # rerun saves, then asks: skip
-        ask.assert_called_once()
-        self.assertEqual(self.opened, [(4, 1), (4, 2)])
-        self.assertEqual(self.s.manual_trials(), [4])
-        with patch('builtins.input', return_value='c'):
-            self.open([(4, 1)])                   # (4,2) saved on the way in
-        self.assertEqual(self.s.saved_pairs(), {(4, 2)})
+        with patch('builtins.input', side_effect=AssertionError('prompted')):
+            self.open([(4, 1), (4, 2)])           # rerun saves, then REOPENS (4,1)
+            self.assertEqual(self.opened, [(4, 1), (4, 1), (4, 2)])
+            self.assertEqual(self.s.manual_trials(), [4])
+            self.open([(4, 1)], on_existing='ask')   # legacy value: no prompt
+            self.open([(4, 1)], on_existing='skip')  # explicit skip still works
         self.assertEqual(self.opened[-1], (4, 1))
+        self.assertEqual(self.opened.count((4, 1)), 3)
 
-    def test_no_prompt_for_empty_list_or_explicit_choice(self):
-        self.open([(4, 1)])
-        with patch('builtins.input', side_effect=AssertionError):
-            self.open([])
-            self.open([(4, 1)], on_existing='rescore')
-        self.assertEqual(self.opened, [(4, 1), (4, 1)])
+    def test_clear_one_rep_and_clean_state(self):
+        ed, = self.open([(4, 1)])
+        ed.save()
+        ed2, = self.open([(4, 2)])
+        ed2.save()
+        self.assertEqual(self.s.saved_pairs(), {(4, 1), (4, 2)})
+        self.open([(4, 1)], on_existing='clear')  # (4,2) saved on the way in
+        self.assertEqual(self.s.saved_pairs(), {(4, 2)})
+        # the open (4,1) editor is saved on the way in, so both reps clear
+        self.assertEqual(self.s.clear([4]), 2)
+        self.assertEqual(self.s.saved_pairs(), set())
+        ed3, = self.open([(4, 2)])
+        ed3.save()
+        backup = self.s.clear_all()
+        self.assertFalse(os.path.exists(self.s.rescore_csv))
+        self.assertTrue(os.path.exists(backup))
+        self.assertFalse(self.s.corrected['manual'].any())
 
     def test_bad_pairs_rejected_before_anything_is_saved(self):
         self.open([(4, 1)])
