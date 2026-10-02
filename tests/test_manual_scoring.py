@@ -29,13 +29,13 @@ class ManualScoringTests(unittest.TestCase):
         d = Path(self.tmp.name)
         self.auto = pd.DataFrame(dict(trial=[4, 4], rep=[1, 2], bout=[1, 1],
             walker=['left_foot_a'] * 2, start_s=[10., 30.], stop_s=[16., 36.],
-            duration_s=[6., 6.], distance_m=[5., 5.], measured_m=[5., 5.],
-            distance_error_m=[0., 0.], snip=[0., 1.]))
+            duration_s=[6., 6.], distance_m=[5., 5.], align_max_m=[5., 5.],
+            align_error_m=[0., 0.], snip=[0., 1.]))
         feet = {'left_foot_a': SimpleNamespace(file_path=str(d / 'x.h5'), period=0.01)}
         self.figs = []
         patches = [
             patch.object(bf, 'snip_distances', side_effect=lambda rec, w, **k:
-                         pd.DataFrame({'distance_m': [w[0][1] - w[0][0]]})),
+                         pd.DataFrame({'align_max_m': [w[0][1] - w[0][0]]})),
             patch.object(bf, 'save_trial_figures', side_effect=lambda *a, **k:
                          self.figs.append(k['trials'])),
             patch('matplotlib.pyplot.close')]
@@ -59,7 +59,7 @@ class ManualScoringTests(unittest.TestCase):
         ed.save()
         table = pd.read_csv(self.s.manual_aligned_csv)
         self.assertEqual(table['manual'].tolist(), [True, False])
-        self.assertEqual(table.loc[0, 'measured_m'], 5.)
+        self.assertEqual(table.loc[0, 'align_max_m'], 5.)
         self.assertEqual(self.figs, [[(4, 1)]])   # only the corrected rep
         self.assertIn('table + trial 4 figure(s) updated', ed.note)
         pd.testing.assert_frame_equal(self.s.auto, self.auto)
@@ -107,3 +107,39 @@ class ManualScoringTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+    def test_set_window_seconds_and_samples_and_unmatch(self):
+        r = self.s.set_window(4, 1, 'a', 12.0, 18.0)
+        self.assertEqual(self.s.saved_pairs(), {(4, 1)})
+        self.assertEqual((r['start_s'], r['stop_s'], bool(r['manual'])), (12.0, 18.0, True))
+        self.s.set_window(4, 2, 'a', 3100, 3700, units='samples')   # period 0.01
+        row = self.s.corrected[(self.s.corrected.trial == 4) & (self.s.corrected.rep == 2)].iloc[0]
+        self.assertEqual((row['start_s'], row['stop_s']), (31.0, 37.0))
+        with self.assertRaises(ValueError):
+            self.s.set_window(4, 1, 'c', 1, 2)
+        with self.assertRaises(ValueError):
+            self.s.set_window(99, 1, 'a', 1, 2)
+        with self.assertRaises(ValueError):
+            self.s.set_window(4, 1, 'a', 5, 5)
+        r = self.s.unmatch(4, 1, 'a')
+        self.assertTrue(pd.isna(r['start_s']) and pd.isna(r['align_max_m']) and bool(r['manual']))
+        self.assertTrue(pd.isna(r['walked_m']) and pd.isna(r['gait_duration_s']))
+        saved = pd.read_csv(self.s.rescore_csv)
+        self.assertTrue(saved.loc[saved.rep == 1, 'start_s'].isna().all())
+        self.s.clear([(4, 1)])                                       # undo
+        self.assertEqual(self.s.corrected.loc[0, 'start_s'], 10.0)   # automatic again
+
+
+class ManualWindowNoBoutTests(unittest.TestCase):
+    def test_file_accepts_both_empty_but_not_half(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'r.csv'
+            bf.save_manual_windows(path, [dict(trial=1, rep=1, person='a',
+                                               start_s=float('nan'), stop_s=float('nan'))])
+            self.assertTrue(pd.read_csv(path)['start_s'].isna().all())
+            with self.assertRaises(ValueError):
+                bf.save_manual_windows(path, [dict(trial=1, rep=1, person='a',
+                                                   start_s=float('nan'), stop_s=5.)])

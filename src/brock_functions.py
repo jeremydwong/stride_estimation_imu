@@ -164,9 +164,32 @@ def stop_after(feet, subject, end_abs, period):
 
 def bout_sync_strides_steps(feet, subject, i0, i1, period,
                   initial_separation=0.2, anchor_mode='firstonly',
-                  gravity_seconds=1.0, force_snug_abs=None, snug_end_enabled=True):
-    """Walk-onset snip + stride pipeline for one bout; pull out the series the
-    figure needs (|A| and |V| per foot, footfalls, steps, snug start).
+                  gravity_seconds=1.0, manual=False, resnug=True,
+                  snug_abs=None, end_overridden=False):
+    """THE per-bout pipeline: snug the gait inside the window [i0, i1], run
+    both feet + strides + steps, and pull out the series the figure needs
+    (|A| and |V| per foot, footfalls, steps, snug start). One entry point for
+    automatic and manual bouts, so their timing is found by the same rule.
+
+    Snugging rule:
+    * resnug=True (default): [i0, i1] is only the SEARCH window - exactly
+      like the Start/Stop button presses. snug_start puts the gait start in
+      the valley before the first committed swing, snug_end the gait end in
+      the settling valley after the last one. Used for every automatic bout
+      and, by default, for manual windows too.
+    * resnug=False (legacy): a manual window IS the gait - the start is
+      pinned (snug_abs, else i0) and the end is not trimmed. An automatic
+      bout still snugs, except that an overridden end (end_overridden, the
+      drag editor) is kept as dragged.
+
+    Stop check (stop_after): if the gait end is not followed by a true stop,
+    an AUTOMATIC bout whose end is still the Stop press is re-run with the
+    window extended STOP_EXTEND_STEP_S at a time (up to STOP_EXTEND_MAX_S)
+    until a stop is found - the press may have come before the walk ended.
+    If none is found the ORIGINAL window's result is kept, flagged. A manual
+    or dragged end is NEVER extended (the scientist's judgement stands); it
+    is only flagged. The result carries stop_found, end_extended_s (and
+    stop_searched_s when the search failed).
 
     anchor_mode='firstonly' anchors the common frame at the first foot contacts
     so the assumed `initial_separation` lateral offset sits at the gait start
@@ -190,106 +213,143 @@ def bout_sync_strides_steps(feet, subject, i0, i1, period,
     window so the final ZUPT and step metrics use the trimmed end. An explicit
     inspector end override disables automatic end trimming.
     """
-    # Walk onset + opening-stance lead-in, from the subject's RAW stillness
-    # (|gyro| < STILL_RAD_S rad/s on either foot = moving). detect_quiet_time
-    # is NOT used here: it demands 1.5 s runs and prunes samples (it is a
-    # bias-window hunter), so it misses short genuine stances and can even
-    # place "onset" after the first swing already happened.
-    #
-    # onset: first moving sample at/after the click — but if a foot is
-    # already mid-swing AT the click (jumped the gun / late press), walk back
-    # to that motion run's start. lead: consecutive BOTH-feet-still samples
-    # immediately before onset, up to `grav`, allowed to cross the click
-    # (the true side-by-side stance often sits just before the Start press).
-    # The kept stretch is pinned as stance by the mechanization's own
-    # footfall criterion; snug_start's valley then lands at its end.
-    grav = int(round(gravity_seconds / period))
-    a0 = max(0, i0 - grav)                       # search floor (pre-click cap)
-    b0 = min(i1, i0 + int(round(5.0 / period)))  # onset must be near the click
-    moving = np.zeros(b0 - a0, bool)
-    for side in ('left', 'right'):
-        Wm = np.linalg.norm(feet[(subject, side)].Wb[a0:b0], axis=1) / period
-        moving |= Wm >= STILL_RAD_S
-    click = i0 - a0
-    if moving[click]:                            # mid-swing at the click
-        run = np.flatnonzero(~moving[:click][::-1])
-        onset = i0 - (int(run[0]) if len(run) else click)
+    import warnings
+    rank_warning = (   # np.RankWarning in numpy 1.x, moved in 2.x
+        getattr(getattr(np, 'exceptions', None), 'RankWarning', None)
+        or getattr(np, 'RankWarning', RuntimeWarning))
+    if resnug:
+        force_snug_abs_, snug_end_enabled_ = None, True
     else:
-        after = np.flatnonzero(moving[click:])
-        onset = i0 + (int(after[0]) if len(after) else b0 - i0)
-    still_before = ~moving[:onset - a0]
-    run = np.flatnonzero(~still_before[::-1])
-    lead = min(grav, int(run[0]) if len(run) else len(still_before))
-    snip = max(0, onset - lead)
-    result = process_bout(feet, subject, snip, i1, period, pad_seconds=0.0)
-    end_foot = None
-    if snug_end_enabled:
-        # Find the end on a trajectory that runs ~1 s PAST the window: cut at
-        # the window edge, a swing still in progress there is truncated into
-        # a fake landing (a mid-walk end drag landed mid-swing). The gait
-        # ends at the last landing completed inside the window.
-        n_rec = min(len(feet[(subject, s)].Wb) for s in ('left', 'right'))
-        ext_stop = min(n_rec, i1 + int(round(END_LOOKAHEAD_S / period)))
-        ext = (result if ext_stop <= i1 else
-               process_bout(feet, subject, snip, ext_stop, period,
-                            pad_seconds=0.0))
-        end_snap, end_foot = imu.snug_end(ext['left_info'], ext['right_info'],
-                                          limit=i1 - 1 - ext['slice'][0])
-        if end_snap is not None:
-            # snug_end is inclusive; processing slices are exclusive at i1.
-            trimmed_stop = ext['slice'][0] + end_snap + 1
-            if snip + 2 <= trimmed_stop < result['slice'][1]:
-                result = process_bout(feet, subject, snip, trimmed_stop, period,
-                                      pad_seconds=0.0)
-    # force_snug_abs: absolute sample to pin the snug gait start to (interactive
-    # override of snug_start's detection); converted to slice-relative here
-    force_snap = (None if force_snug_abs is None
-                  else int(force_snug_abs) - result['slice'][0])
-    steps = imu.steps_from_strides(result['left_strides'], result['right_strides'],
-                                   result['left_info'], result['right_info'], period,
-                                   initial_separation=initial_separation,
-                                   anchor_mode=anchor_mode, force_snap=force_snap)
-    j0, j1 = result['slice']
-    steps['end_snap'] = j1 - j0 - 1
-    steps['end_snap_foot'] = end_foot
-    # time axis referenced to the SNUG-UP sample (best estimate of gait start):
-    # t=0 = snug start, the manually-clipped pre-walk sits at negative t. Fall back
-    # to the detected onset if no snug was found.
-    snap = steps.get('start_snap')
-    onset_in_slice = onset - j0
-    t_ref = snap if snap is not None else onset_in_slice   # slice-relative t=0
-    t0_abs = j0 + t_ref                                    # absolute sample at t=0
-    t = (np.arange(j1 - j0) - t_ref) * period
+        force_snug_abs_ = (snug_abs if snug_abs is not None
+                           else (i0 if manual else None))
+        snug_end_enabled_ = not (manual or end_overridden)
+    i0, i1 = int(i0), int(i1)
 
-    sides, step_sides = {}, {}
-    for side in ['left', 'right']:
-        info = result[f'{side}_info']
-        td = imu.touchdown_map(info.stationary_periods, period)
-        ff = np.unique(td[np.where(info.FF_walking)[0]])
-        sides[side] = {'Vm': info.Vm, 'Am': np.linalg.norm(info.A, axis=1),
-                       'ff_idx': ff,
-                       'ff_t': (ff - t_ref) * period, 'ff_v': info.Vm[ff]}
-        sel = steps['leading_foot'] == side
-        lead_idx = steps['end_idx'][sel].astype(int)
-        step_sides[side] = {'t': (lead_idx - t_ref) * period,
-                            'v': info.Vm[lead_idx]}
+    def attempt(i1):
+        """One run of the pipeline on [i0, i1] (the loop below may extend i1)."""
+        # Walk onset + opening-stance lead-in, from the subject's RAW stillness
+        # (|gyro| < STILL_RAD_S rad/s on either foot = moving). detect_quiet_time
+        # is NOT used here: it demands 1.5 s runs and prunes samples (it is a
+        # bias-window hunter), so it misses short genuine stances and can even
+        # place "onset" after the first swing already happened.
+        #
+        # onset: first moving sample at/after the click — but if a foot is
+        # already mid-swing AT the click (jumped the gun / late press), walk back
+        # to that motion run's start. lead: consecutive BOTH-feet-still samples
+        # immediately before onset, up to `grav`, allowed to cross the click
+        # (the true side-by-side stance often sits just before the Start press).
+        # The kept stretch is pinned as stance by the mechanization's own
+        # footfall criterion; snug_start's valley then lands at its end.
+        grav = int(round(gravity_seconds / period))
+        a0 = max(0, i0 - grav)                       # search floor (pre-click cap)
+        b0 = min(i1, i0 + int(round(5.0 / period)))  # onset must be near the click
+        moving = np.zeros(b0 - a0, bool)
+        for side in ('left', 'right'):
+            Wm = np.linalg.norm(feet[(subject, side)].Wb[a0:b0], axis=1) / period
+            moving |= Wm >= STILL_RAD_S
+        click = i0 - a0
+        if moving[click]:                            # mid-swing at the click
+            run = np.flatnonzero(~moving[:click][::-1])
+            onset = i0 - (int(run[0]) if len(run) else click)
+        else:
+            after = np.flatnonzero(moving[click:])
+            onset = i0 + (int(after[0]) if len(after) else b0 - i0)
+        still_before = ~moving[:onset - a0]
+        run = np.flatnonzero(~still_before[::-1])
+        lead = min(grav, int(run[0]) if len(run) else len(still_before))
+        snip = max(0, onset - lead)
+        result = process_bout(feet, subject, snip, i1, period, pad_seconds=0.0)
+        end_foot = None
+        if snug_end_enabled_:
+            # Find the end on a trajectory that runs ~1 s PAST the window: cut at
+            # the window edge, a swing still in progress there is truncated into
+            # a fake landing (a mid-walk end drag landed mid-swing). The gait
+            # ends at the last landing completed inside the window.
+            n_rec = min(len(feet[(subject, s)].Wb) for s in ('left', 'right'))
+            ext_stop = min(n_rec, i1 + int(round(END_LOOKAHEAD_S / period)))
+            ext = (result if ext_stop <= i1 else
+                   process_bout(feet, subject, snip, ext_stop, period,
+                                pad_seconds=0.0))
+            end_snap, end_foot = imu.snug_end(ext['left_info'], ext['right_info'],
+                                              limit=i1 - 1 - ext['slice'][0])
+            if end_snap is not None:
+                # snug_end is inclusive; processing slices are exclusive at i1.
+                trimmed_stop = ext['slice'][0] + end_snap + 1
+                if snip + 2 <= trimmed_stop < result['slice'][1]:
+                    result = process_bout(feet, subject, snip, trimmed_stop, period,
+                                          pad_seconds=0.0)
+        # force_snug_abs_: absolute sample to pin the snug gait start to (interactive
+        # override of snug_start's detection); converted to slice-relative here
+        force_snap = (None if force_snug_abs_ is None
+                      else int(force_snug_abs_) - result['slice'][0])
+        steps = imu.steps_from_strides(result['left_strides'], result['right_strides'],
+                                       result['left_info'], result['right_info'], period,
+                                       initial_separation=initial_separation,
+                                       anchor_mode=anchor_mode, force_snap=force_snap)
+        j0, j1 = result['slice']
+        steps['end_snap'] = j1 - j0 - 1
+        steps['end_snap_foot'] = end_foot
+        # time axis referenced to the SNUG-UP sample (best estimate of gait start):
+        # t=0 = snug start, the manually-clipped pre-walk sits at negative t. Fall back
+        # to the detected onset if no snug was found.
+        snap = steps.get('start_snap')
+        onset_in_slice = onset - j0
+        t_ref = snap if snap is not None else onset_in_slice   # slice-relative t=0
+        t0_abs = j0 + t_ref                                    # absolute sample at t=0
+        t = (np.arange(j1 - j0) - t_ref) * period
 
-    n_strides = (len(result['left_strides'].time) +
-                 len(result['right_strides'].time))
-    # plot series (sides/step_sides/steps/t…) for the panel, PLUS the raw
-    # per-foot objects + slice so a caller can build a table without re-running
-    # the pipeline. This dict is the single per-bout result for both the batch
-    # figures and the notebook table.
-    return {'subject': subject, 'period': period, 'onset': onset,
-            't_ref': t_ref, 't0_abs': t0_abs, 'end_abs': j1 - 1,
-            'stop_found': stop_after(feet, subject, j1 - 1, period),
-            'end_extended_s': 0.0,
-            'slice': (j0, j1), 't': t,
-            'sides': sides, 'step_sides': step_sides, 'steps': steps,
-            'n_strides': n_strides, 'initial_separation': initial_separation,
-            'left_info': result['left_info'], 'right_info': result['right_info'],
-            'left_strides': result['left_strides'],
-            'right_strides': result['right_strides']}
+        sides, step_sides = {}, {}
+        for side in ['left', 'right']:
+            info = result[f'{side}_info']
+            td = imu.touchdown_map(info.stationary_periods, period)
+            ff = np.unique(td[np.where(info.FF_walking)[0]])
+            sides[side] = {'Vm': info.Vm, 'Am': np.linalg.norm(info.A, axis=1),
+                           'ff_idx': ff,
+                           'ff_t': (ff - t_ref) * period, 'ff_v': info.Vm[ff]}
+            sel = steps['leading_foot'] == side
+            lead_idx = steps['end_idx'][sel].astype(int)
+            step_sides[side] = {'t': (lead_idx - t_ref) * period,
+                                'v': info.Vm[lead_idx]}
+
+        n_strides = (len(result['left_strides'].time) +
+                     len(result['right_strides'].time))
+        # plot series (sides/step_sides/steps/t…) for the panel, PLUS the raw
+        # per-foot objects + slice so a caller can build a table without re-running
+        # the pipeline. This dict is the single per-bout result for both the batch
+        # figures and the notebook table.
+        return {'subject': subject, 'period': period, 'onset': onset,
+                't_ref': t_ref, 't0_abs': t0_abs, 'end_abs': j1 - 1,
+                'stop_found': stop_after(feet, subject, j1 - 1, period),
+                'end_extended_s': 0.0,
+                'slice': (j0, j1), 't': t,
+                'sides': sides, 'step_sides': step_sides, 'steps': steps,
+                'n_strides': n_strides, 'initial_separation': initial_separation,
+                'left_info': result['left_info'], 'right_info': result['right_info'],
+                'left_strides': result['left_strides'],
+                'right_strides': result['right_strides']}
+
+    may_extend = snug_end_enabled_ and not manual and not end_overridden
+    n_rec = min(len(feet[(subject, s)].Wb) for s in ('left', 'right'))
+    step = int(round(STOP_EXTEND_STEP_S / period))
+    n_steps = (int(round(STOP_EXTEND_MAX_S / STOP_EXTEND_STEP_S))
+               if may_extend else 0)
+    with warnings.catch_warnings():  # stride polyfit warns on short bouts
+        warnings.simplefilter('ignore', rank_warning)
+        first = None
+        for k in range(n_steps + 1):
+            stop = min(n_rec, i1 + k * step)
+            res = attempt(stop)
+            res['end_extended_s'] = (stop - i1) * period
+            first = res if first is None else first
+            if res['stop_found']:
+                return res
+            if stop >= n_rec:
+                break
+    # no stop even when extended: keep the ORIGINAL window's gait, flagged
+    # (searching further would only reach the next movement)
+    first['end_extended_s'] = 0.0
+    first['stop_searched_s'] = n_steps * STOP_EXTEND_STEP_S
+    return first
 
 
 # ---------------------------------------------------------------------------
@@ -567,6 +627,29 @@ def load_available_feet(file_path, patterns=('foot',)):
             if any(p in label for p in patterns)}
 
 
+OLD_COLUMN_NAMES = {        # pre-2026-10-02 names -> current (see README)
+    'measured_m': 'align_max_m',
+    'distance_error_m': 'align_error_m',
+    'automatic_m': 'automatic_align_max_m',
+    'change_m': 'align_change_m',
+}
+
+
+def _upgrade_columns(df):
+    """Copy of a bout table with old column names mapped to the current ones.
+
+    `measured_m` was renamed `align_max_m` (and distance_error_m ->
+    align_error_m) because students read "measured" as the result; it is the
+    alignment FEATURE (largest single-foot excursion over the padded press
+    window), computed before any bout is identified. The result distance is
+    `walked_m`. Old cached CSVs load unchanged through this.
+    """
+    df = df.copy(deep=True)
+    ren = {o: n for o, n in OLD_COLUMN_NAMES.items()
+           if o in df.columns and n not in df.columns}
+    return df.rename(columns=ren) if ren else df
+
+
 def snip_distances(data, snips, pad_seconds=1.0, inferred=None):
     """Per-snip walked distance from the foot IMUs.
 
@@ -577,7 +660,7 @@ def snip_distances(data, snips, pad_seconds=1.0, inferred=None):
     walker's feet move the trial distance; the stander's stay ~0) and the
     moving foot's label identifies the walker.
 
-    Returns a DataFrame with start_s/stop_s/duration_s, distance_m, walker
+    Returns a DataFrame with start_s/stop_s/duration_s, align_max_m, walker
     (label of the foot that moved farthest), and every per-foot distance.
     """
     rec0 = next(iter(data.values()))
@@ -602,7 +685,7 @@ def snip_distances(data, snips, pad_seconds=1.0, inferred=None):
                 row[f'dist_{label}'] = np.nan
         dists = {label: row[f'dist_{label}'] for label in data}
         best = max(dists, key=lambda k: -1 if np.isnan(dists[k]) else dists[k])
-        row['distance_m'] = dists[best]
+        row['align_max_m'] = dists[best]
         row['walker'] = best
         rows.append(row)
     return pd.DataFrame(rows)
@@ -940,7 +1023,7 @@ def align_snips_to_trial_table(feet, snips, processed_trialtable, pad_seconds=1.
       'measured' - per-snip DataFrame (times, per-foot + best distance, walker)
       'expected' - expected bout DataFrame (trial/rep/bout/distance_m/status)
       'aligned'  - expected joined with its matched snip (NaNs where missed),
-                   plus distance_error_m
+                   plus align_error_m
       'missed'   - the aligned rows with no matching snip
       'extra'    - measured rows matching no expected bout
     """
@@ -955,23 +1038,23 @@ def align_snips_to_trial_table(feet, snips, processed_trialtable, pad_seconds=1.
     key = list(zip(expected['trial'], expected['rep']))
     same_trial = np.array([False] + [key[j] == key[j-1] for j in range(1, len(key))])
     matches, missed_idx, extra_idx = align_snips_to_expected(
-        measured['distance_m'], expected['distance_m'], gap_penalty=gap_penalty,
+        measured['align_max_m'], expected['distance_m'], gap_penalty=gap_penalty,
         times=measured['start_s'], same_trial=same_trial, spacing=spacing,
         time_weight=time_weight)
 
     aligned = expected.copy()
-    for col in ('snip', 'start_s', 'stop_s', 'duration_s', 'measured_m'):
+    for col in ('snip', 'start_s', 'stop_s', 'duration_s', 'align_max_m'):
         aligned[col] = np.nan
     aligned['walker'] = ''
     aligned['inferred'] = False
     for si, ej in matches:
         aligned.loc[ej, ['snip', 'start_s', 'stop_s', 'duration_s']] = (
             si, *measured.loc[si, ['start_s', 'stop_s', 'duration_s']])
-        aligned.loc[ej, 'measured_m'] = measured.loc[si, 'distance_m']
+        aligned.loc[ej, 'align_max_m'] = measured.loc[si, 'align_max_m']
         aligned.loc[ej, 'walker'] = measured.loc[si, 'walker']
         if 'inferred' in measured.columns:
             aligned.loc[ej, 'inferred'] = bool(measured.loc[si, 'inferred'])
-    aligned['distance_error_m'] = aligned['measured_m'] - aligned['distance_m']
+    aligned['align_error_m'] = aligned['align_max_m'] - aligned['distance_m']
     aligned['reaction_s'] = estimate_reaction_s(feet, aligned)
     aligned['jumped_gun'] = flag_jumped_gun(feet, aligned,
                                             reaction_s=aligned['reaction_s'])
@@ -1005,7 +1088,9 @@ def assign_walkers_by_protocol(feet, result, first_walker='a'):
         raise ValueError("first_walker must be 'a' or 'b'")
     other = {'a': 'b', 'b': 'a'}[first_walker]
     measured = result['measured']
-    aligned = result['aligned'].copy()
+    if 'align_max_m' not in measured.columns and 'distance_m' in measured.columns:
+        measured = measured.rename(columns={'distance_m': 'align_max_m'})
+    aligned = _upgrade_columns(result['aligned'])
     aligned['walker_auto'] = aligned['walker']
     aligned['walker_changed'] = False
     for i, row in aligned[aligned['snip'].notna()].iterrows():
@@ -1019,8 +1104,8 @@ def assign_walkers_by_protocol(feet, result, first_walker='a'):
         aligned.loc[i, 'walker_changed'] = (
             str(row['walker']).rsplit('_', 1)[-1] != person)
         aligned.loc[i, 'walker'] = foot
-        aligned.loc[i, 'measured_m'] = dists[foot]
-    aligned['distance_error_m'] = aligned['measured_m'] - aligned['distance_m']
+        aligned.loc[i, 'align_max_m'] = dists[foot]
+    aligned['align_error_m'] = aligned['align_max_m'] - aligned['distance_m']
     aligned['reaction_s'] = estimate_reaction_s(feet, aligned)
     aligned['jumped_gun'] = flag_jumped_gun(feet, aligned,
                                             reaction_s=aligned['reaction_s'])
@@ -1052,69 +1137,6 @@ def feet_pairs_from_labels(data):
     return out
 
 
-def snugged_bout(pairs, subject, i0, i1, period, manual=False, resnug=True,
-                 snug_abs=None, end_overridden=False, **kwargs):
-    """Run one bout through the pipeline with THE snugging rule.
-
-    The single place that decides how a bout's gait start/end are found, so
-    automatic and manual bouts get identical timing:
-
-    * resnug=True (default): [i0, i1] is only the SEARCH window - exactly
-      like the Start/Stop button presses. snug_start puts the gait start in
-      the valley before the first committed swing, snug_end the gait end in
-      the settling valley after the last one. Used for every automatic bout
-      and, by default, for manual windows too.
-    * resnug=False (legacy): a manual window IS the gait - the start is
-      pinned (snug_abs, else i0) and the end is not trimmed. An automatic
-      bout still snugs, except that an overridden end (end_overridden, the
-      drag editor) is kept as dragged.
-
-    Stop check (stop_after): if the gait end is not followed by a true
-    stop, an AUTOMATIC bout whose end is still the Stop press is re-snugged
-    with the window extended STOP_EXTEND_STEP_S at a time (up to
-    STOP_EXTEND_MAX_S) until a stop is found - the press may have come
-    before the walk ended. A manual or dragged end is NEVER extended (the
-    scientist's judgement stands); it is only flagged. The result carries
-    stop_found and end_extended_s.
-
-    kwargs go to bout_sync_strides_steps (initial_separation, anchor_mode).
-    Returns its result dict (t0_abs = gait start, end_abs = gait end, both
-    absolute samples).
-    """
-    import warnings
-    rank_warning = (   # np.RankWarning in numpy 1.x, moved in 2.x
-        getattr(getattr(np, 'exceptions', None), 'RankWarning', None)
-        or getattr(np, 'RankWarning', RuntimeWarning))
-    if resnug:
-        force, snug_end = None, True
-    else:
-        force = snug_abs if snug_abs is not None else (i0 if manual else None)
-        snug_end = not (manual or end_overridden)
-    may_extend = snug_end and not manual and not end_overridden
-    n_rec = min(len(pairs[(subject, s)].Wb) for s in ('left', 'right'))
-    step = int(round(STOP_EXTEND_STEP_S / period))
-    n_steps = int(round(STOP_EXTEND_MAX_S / STOP_EXTEND_STEP_S)) if may_extend else 0
-    with warnings.catch_warnings():  # stride polyfit warns on short bouts
-        warnings.simplefilter('ignore', rank_warning)
-        first = None
-        for k in range(n_steps + 1):
-            stop = min(n_rec, int(i1) + k * step)
-            res = bout_sync_strides_steps(pairs, subject, int(i0), stop, period,
-                                          force_snug_abs=force,
-                                          snug_end_enabled=snug_end, **kwargs)
-            res['end_extended_s'] = (stop - int(i1)) * period
-            first = res if first is None else first
-            if res['stop_found']:
-                return res
-            if stop >= n_rec:
-                break
-    # no stop even when extended: keep the ORIGINAL window's gait, flagged
-    # (searching further would only reach the next movement)
-    first['end_extended_s'] = 0.0
-    first['stop_searched_s'] = n_steps * STOP_EXTEND_STEP_S
-    return first
-
-
 def add_gait_timing(feet, aligned, only=None, resnug=True, cache=None):
     """Add gait_start_s / gait_end_s / gait_duration_s from the snugged bouts,
     plus stop_found (a true stop follows the gait end), end_extended_s
@@ -1122,19 +1144,19 @@ def add_gait_timing(feet, aligned, only=None, resnug=True, cache=None):
     walked_m: the walked distance exactly as the inspection figures draw it
     (snugged gait, mean of both feet, gait start -> farthest footfall), and
     came_back (the window also contains a walk back after a turn). Compare
-    walked_m with the target distance_m; measured_m is the alignment's padded
+    walked_m with the target distance_m; align_max_m is the alignment's padded
     max excursion and runs larger.
 
     For every matched bout (or only the rows where boolean `only` is True),
-    runs snugged_bout() on its [start_s, stop_s] window with the walker's
+    runs bout_sync_strides_steps() on its [start_s, stop_s] window with the walker's
     feet: the same snugging the figures show, so table timing and figures
     agree, for automatic and manual bouts alike. Session seconds; NaN where
     the bout is missed or the pipeline fails. `cache` (dict) memoizes by
     (walker, window, manual, resnug). Returns a copy.
     """
-    out = aligned.copy()
+    out = _upgrade_columns(aligned)
     for col in ('gait_start_s', 'gait_end_s', 'gait_duration_s',
-                'end_extended_s', 'walked_m'):
+                'end_extended_s', 'walked_m', 'walked_error_m'):
         if col not in out:
             out[col] = np.nan
     for col in ('stop_found', 'came_back'):
@@ -1142,9 +1164,15 @@ def add_gait_timing(feet, aligned, only=None, resnug=True, cache=None):
             out[col] = pd.Series(pd.NA, index=out.index, dtype='boolean')
     pairs = feet_pairs_from_labels(feet)
     period = next(iter(feet.values())).period
-    sel = out['start_s'].notna() & out['stop_s'].notna()
-    if only is not None:
-        sel &= pd.Series(only, index=out.index).fillna(False).astype(bool)
+    has_win = out['start_s'].notna() & out['stop_s'].notna()
+    scope = (pd.Series(only, index=out.index).fillna(False).astype(bool)
+             if only is not None else pd.Series(True, index=out.index))
+    # in scope but no window (missed, or unmatched by hand): no gait
+    for idx in out.index[scope & ~has_win]:
+        out.loc[idx, ['gait_start_s', 'gait_end_s', 'gait_duration_s',
+                      'end_extended_s', 'walked_m', 'walked_error_m']] = np.nan
+        out.loc[idx, ['stop_found', 'came_back']] = pd.NA
+    sel = has_win & scope
     for idx in out.index[sel]:
         row = out.loc[idx]
         person = str(row['walker']).rsplit('_', 1)[-1]
@@ -1161,7 +1189,7 @@ def add_gait_timing(feet, aligned, only=None, resnug=True, cache=None):
             if subject and (subject, 'left') in pairs and (subject, 'right') in pairs:
                 try:
                     with contextlib.redirect_stdout(io.StringIO()):
-                        r = snugged_bout(pairs, subject,
+                        r = bout_sync_strides_steps(pairs, subject,
                                          int(row['start_s'] / period),
                                          int(row['stop_s'] / period), period,
                                          manual=manual, resnug=resnug)
@@ -1174,7 +1202,8 @@ def add_gait_timing(feet, aligned, only=None, resnug=True, cache=None):
             if cache is not None:
                 cache[key] = (g0, g1, stop, ext, walked, came_back)
         out.loc[idx, ['gait_start_s', 'gait_end_s', 'gait_duration_s',
-                      'end_extended_s', 'walked_m']] = (g0, g1, g1 - g0, ext, walked)
+                      'end_extended_s', 'walked_m', 'walked_error_m']] = (
+            g0, g1, g1 - g0, ext, walked, walked - float(row['distance_m']))
         out.loc[idx, 'came_back'] = came_back
         out.loc[idx, 'stop_found'] = stop
     return out
@@ -1197,18 +1226,19 @@ def _stop_note(res, manual=False):
 
 def _bout_title(row, walked_m=None, came_back=False):
     """Bout block title: target vs the walked distance AS DRAWN (snugged gait,
-    mean of both feet, start -> last footfall), plus the alignment's 'snip
+    mean of both feet, start -> last footfall), plus the alignment's 'align
     max' (largest single-foot excursion over the padded button window - the
-    number used to match snips to trials; it includes pre/post-walk motion
-    and drift, so it is usually larger than the drawn walk)."""
+    number used ONLY to match snips to trials, before anything is measured;
+    it includes pre/post-walk motion and drift, so it is usually larger than
+    the drawn walk)."""
     txt = (f"rep {int(row['rep'])} bout {int(row['bout'])}: {row['walker']} "
            f"walks - target {row['distance_m']:.1f} m")
     if walked_m is not None and np.isfinite(walked_m):
         txt += f", walked {walked_m:.1f} m (as drawn)"
     if came_back:
         txt += ' [walked back after a turn - check the end]'
-    if pd.notna(row.get('measured_m')):
-        txt += f", snip max {row['measured_m']:.1f} m"
+    if pd.notna(row.get('align_max_m')):
+        txt += f", align max {row['align_max_m']:.1f} m"
     return txt + (' [inferred stop]' if row.get('inferred') else '')
 
 
@@ -1224,7 +1254,7 @@ def _render_inspect_block(axes5, feet, pairs, row, period,
     Shared by inspect_snipped_trial() and the draggable interactive version.
     Clears the axes first, so it can redraw in place. `i0_abs` / `i1_abs`
     override the search window (absolute samples; default = the row's
-    start_s/stop_s). Snugging follows snugged_bout(resnug=...); `snug_abs`
+    start_s/stop_s). Snugging follows bout_sync_strides_steps(resnug=...); `snug_abs`
     pins the gait start only when resnug=False. Returns the
     bout_sync_strides_steps() result dict, or None when the pipeline failed
     (the failure is written on the axes).
@@ -1254,7 +1284,7 @@ def _render_inspect_block(axes5, feet, pairs, row, period,
     i0 = int(i0_abs) if i0_abs is not None else int(row['start_s'] / period)
     i1 = int(i1_abs) if i1_abs is not None else int(row['stop_s'] / period)
     try:
-        res = snugged_bout(pairs, subject, i0, i1, period,
+        res = bout_sync_strides_steps(pairs, subject, i0, i1, period,
                            manual=row.get('manual', False) == True,
                            resnug=resnug, snug_abs=snug_abs,
                            end_overridden=i1_abs is not None,
@@ -1358,6 +1388,7 @@ def _inspect_rows(aligned, trial, rep=None):
     """The matched bouts of a trial (optionally one rep); ValueError if none."""
     if rep is not None and (isinstance(rep, bool) or rep not in (1, 2)):
         raise ValueError('rep must be 1 or 2')
+    aligned = _upgrade_columns(aligned)
     rows = aligned[(aligned['trial'] == trial)].dropna(subset=['start_s',
                                                                'stop_s'])
     if rep is not None:
@@ -1486,7 +1517,7 @@ def inspect_snipped_trial(feet, aligned, trial, session_tag='',
         this is), start_s/stop_s (the SNIP — the button-press bounds of the
         bout, in seconds of session time; NaN for a missed bout), walker (the
         foot label that moved farthest, so its suffix names the subject),
-        distance_m (expected), measured_m, inferred (True when the Stop was
+        distance_m (expected), align_max_m, inferred (True when the Stop was
         inferred from the feet rather than clicked).
     trial : int
         Trial number (the trial table's 1..48).
@@ -1500,7 +1531,7 @@ def inspect_snipped_trial(feet, aligned, trial, session_tag='',
         the last bout, and each bout block shows pad_s of grey context on
         both sides.
     resnug : bool
-        Snug manual windows like button presses (default; see snugged_bout).
+        Snug manual windows like button presses (default; see bout_sync_strides_steps).
         False draws a manual window as the gait itself.
     plot_every : int
         Plot only every N-th sample (smaller/faster figures; plotting only -
@@ -1591,20 +1622,28 @@ def save_trial_figures(feet, aligned, session_tag, out_dir=None,
 def save_manual_windows(csv_path, records):
     """Upsert edits by trial/rep/person; preserve other windows, atomically.
 
-    Both editors use this shared file format. Existing append-only histories
-    are collapsed to their latest entries on the next save.
+    Both editors, ManualScoring.set_window() and .unmatch() use this shared
+    file format: trial, rep, person (a/b), start_s, stop_s in session seconds.
+    A record with BOTH start_s and stop_s empty/NaN means "this bout did not
+    happen" (unmatch: the aligned row becomes a missed bout). Existing
+    append-only histories are collapsed to their latest entries on the next
+    save.
     """
     import tempfile
     columns = ['trial', 'rep', 'person', 'start_s', 'stop_s']
     updates = pd.DataFrame(records, columns=columns)
     if updates.empty:
         return
+    t = updates[['start_s', 'stop_s']].to_numpy(float)
+    no_bout = np.isnan(t).all(axis=1)
+    finite = np.isfinite(t).all(axis=1)
     if not (updates['person'].isin(['a', 'b']).all()
             and updates['rep'].isin([1, 2]).all()
-            and np.isfinite(updates[['start_s', 'stop_s']].to_numpy(float)).all()
-            and (updates.start_s >= 0).all()
-            and (updates.stop_s > updates.start_s).all()):
-        raise ValueError('Manual windows require person a/b, rep 1/2, and 0 <= start < stop')
+            and (no_bout | finite).all()
+            and (updates.start_s[finite] >= 0).all()
+            and (updates.stop_s[finite] > updates.start_s[finite]).all()):
+        raise ValueError('Manual windows require person a/b, rep 1/2, and '
+                         '0 <= start < stop (or BOTH empty = no bout)')
     old = pd.read_csv(csv_path) if os.path.exists(csv_path) else pd.DataFrame(columns=columns)
     merged = (pd.concat([old, updates], ignore_index=True) if len(old) else updates
               ).drop_duplicates(['trial', 'rep', 'person'], keep='last'
@@ -2283,8 +2322,10 @@ class _RescoreFigure:
     on_save = None    # ManualScoring hook: called with the trial after a save
 
     def __init__(self, fig, axes, trial, rep, rows, out_csv, session_tag,
-                 feet, period, n_samples, window, plot_every=1, context=None):
+                 feet, period, n_samples, window, plot_every=1, context=None,
+                 resnug=True):
         self.fig, self.axes = fig, axes
+        self.resnug = resnug      # how the walked-distance readout snugs
         # orientation aids (see _draw_context): target distance, the other
         # trials' bouts, button presses, estimated position of missed bouts
         self.context = context or {}
@@ -2457,9 +2498,33 @@ class _RescoreFigure:
             self.new[person] = [t0, t1]
             self.pending = None
             self._say(f"person {person.upper()} rescored to "
-                      f"[{t0:.1f}, {t1:.1f}] s - press 'save' to keep it "
-                      f"(or rescore again)")
+                      f"[{t0:.1f}, {t1:.1f}] s - computing...")
             self._draw_spans()
+            self._say(f"person {person.upper()} rescored to "
+                      f"[{t0:.1f}, {t1:.1f}] s{self._walked_note(person, t0, t1)}"
+                      f" - press 'save' to keep it (or rescore again)")
+
+    def _walked_note(self, person, t0, t1):
+        """'; walked ~ X m (target Y m)' for a just-clicked window: the SAME
+        pipeline the saved table/figures will run on it (snugged inside the
+        window), so the number you see while scoring is the number you get."""
+        try:
+            pairs = feet_pairs_from_labels(self.feet)
+            subject = {'a': 's1', 'b': 's2'}[person]
+            with contextlib.redirect_stdout(io.StringIO()):
+                res = bout_sync_strides_steps(
+                    pairs, subject, int(t0 / self.period), int(t1 / self.period),
+                    self.period, manual=True, resnug=self.resnug)
+            walked = imu.overhead_travel(res)['mean']
+            target = self.context.get('target_m')
+            note = f'; walked \u2248 {walked:.1f} m'
+            if target is not None:
+                note += f' (target {target:g} m)'
+            if not res.get('stop_found'):
+                note += ' - no clear stop in this window'
+            return note
+        except Exception as e:                       # noqa: BLE001 - shown
+            return f'; (walked distance not computed: {e})'
 
     def save(self, _event=None):
         if not self.new:
@@ -2476,7 +2541,7 @@ class _RescoreFigure:
 
 
 def manual_correct(feet, aligned, trials, out_csv='brock_manual_rescore.csv',
-                   pad_s=10.0, session_tag='', plot_every=1):
+                   pad_s=10.0, session_tag='', plot_every=1, resnug=True):
     """Interactive inspection + click-to-resnip for a list of trials.
 
     For each requested (trial, rep) this brings up an inspection figure -
@@ -2588,7 +2653,8 @@ def manual_correct(feet, aligned, trials, out_csv='brock_manual_rescore.csv',
         ctrl = _RescoreFigure(fig, list(axes), trial, rep, rows, out_csv,
                               session_tag, feet, period, n_samples,
                               window=(lo - pad_s, hi + pad_s),
-                              plot_every=plot_every, context=context)
+                              plot_every=plot_every, context=context,
+                              resnug=resnug)
         # buttons + window text fields along the bottom
         slots = [('rescore A', ctrl.arm('a')), ('rescore B', ctrl.arm('b')),
                  ('save', ctrl.save)]
@@ -2630,9 +2696,11 @@ def apply_manual_rescore(aligned, csv_path):
     and overwrites start_s/stop_s/duration_s of the matching rows: same trial
     and rep, walker suffix == person. A correction for a MISSED bout (walker
     is NaN) fills the first unmatched row of that trial-rep instead, marking
-    walker 'manual_<person>'. Adds a boolean 'manual' column.
+    walker 'manual_<person>'. A record with EMPTY start/stop unmatches the
+    bout (it becomes missed; see ManualScoring.unmatch). Adds a boolean
+    'manual' column.
     """
-    aligned = aligned.copy()
+    aligned = _upgrade_columns(aligned)
     aligned['manual'] = False
     if not os.path.exists(csv_path):
         return aligned
@@ -2652,6 +2720,26 @@ def apply_manual_rescore(aligned, csv_path):
                   f"{fx['person']}: no matching aligned row - ignored")
             continue
         i = idx[0]
+        if pd.isna(fx['start_s']) and pd.isna(fx['stop_s']):
+            # "this bout did not happen": back to a MISSED bout. Everything
+            # measured from the (wrong) snip goes; the person label stays so
+            # the row can be addressed again.
+            for col in ('snip', 'start_s', 'stop_s', 'duration_s',
+                        'align_max_m', 'align_error_m', 'reaction_s',
+                        'gait_start_s', 'gait_end_s', 'gait_duration_s',
+                        'end_extended_s', 'walked_m', 'walked_error_m'):
+                if col in aligned:
+                    aligned.loc[i, col] = np.nan
+            for col in ('inferred', 'jumped_gun'):
+                if col in aligned:
+                    aligned.loc[i, col] = False
+            for col in ('stop_found', 'came_back'):
+                if col in aligned:
+                    aligned.loc[i, col] = pd.NA
+            aligned.loc[i, 'manual'] = True
+            if pd.isna(aligned.loc[i, 'walker']) or str(aligned.loc[i, 'walker']) == '':
+                aligned.loc[i, 'walker'] = f"manual_{fx['person']}"
+            continue
         aligned.loc[i, ['start_s', 'stop_s']] = fx['start_s'], fx['stop_s']
         aligned.loc[i, 'duration_s'] = fx['stop_s'] - fx['start_s']
         aligned.loc[i, 'manual'] = True
@@ -2672,11 +2760,13 @@ def refresh_manual_distances(feet, aligned, pad_seconds=1.0, cache=None):
     `cache` (optional dict) memoizes distances by (person, start, stop), so
     repeated refreshes only mechanize windows that changed.
     """
-    refreshed = aligned.copy(deep=True)
+    refreshed = _upgrade_columns(aligned)
     manual = refreshed.get('manual', pd.Series(False, index=refreshed.index)).fillna(False)
     for idx in refreshed.index[manual.astype(bool)]:
         row = refreshed.loc[idx]
         start, stop = float(row.start_s), float(row.stop_s)
+        if np.isnan(start) and np.isnan(stop):
+            continue                      # unmatched by hand: nothing to measure
         if not (np.isfinite(start) and np.isfinite(stop) and 0 <= start < stop):
             raise ValueError(f'Invalid manual window at row {idx}: {start}, {stop}')
         person = str(row.walker).rsplit('_', 1)[-1]
@@ -2688,14 +2778,14 @@ def refresh_manual_distances(feet, aligned, pad_seconds=1.0, cache=None):
             distance = cache[key]
         else:
             distance = snip_distances(recordings, [[start, stop]],
-                                      pad_seconds=pad_seconds).iloc[0].distance_m
+                                      pad_seconds=pad_seconds).iloc[0].align_max_m
             if cache is not None:
                 cache[key] = distance
         if not np.isfinite(distance):
             raise ValueError(f'Could not measure manual window at row {idx}')
-        refreshed.loc[idx, 'measured_m'] = distance
+        refreshed.loc[idx, 'align_max_m'] = distance
         refreshed.loc[idx, 'duration_s'] = stop - start
-        refreshed.loc[idx, 'distance_error_m'] = distance - row.distance_m
+        refreshed.loc[idx, 'align_error_m'] = distance - row.distance_m
         # A manual gait boundary is no longer the original Start button cue.
         if 'reaction_s' in refreshed:
             refreshed.loc[idx, 'reaction_s'] = np.nan
@@ -2715,7 +2805,7 @@ def plot_omnibus(feet, events, result, aligned=None, report=None,
     saved. Set refresh_distances=False only for an already-refreshed table.
     Uses draw_event_timeline, whose existing API remains unchanged.
     """
-    table = (result['aligned'] if aligned is None else aligned).copy(deep=True)
+    table = _upgrade_columns(result['aligned'] if aligned is None else aligned)
     if refresh_distances:
         table = refresh_manual_distances(feet, table)
     # The legacy renderer counts matched snip IDs. A recovered manual bout
@@ -2769,14 +2859,16 @@ def corrected_alignment(feet, auto_aligned, rescore_csv, cache=None,
 def manual_changes(auto_aligned, corrected):
     """One row per corrected bout: new window/distance next to the automatic one.
 
-    measured_m / automatic_m are the alignment metric (padded max excursion);
-    walked_m / automatic_walked_m are the distance as the figures draw it.
-    automatic_* is NaN for a missed bout that was recovered by hand.
+    walked_m / automatic_walked_m are the distance as the figures draw it
+    (walked_change_m = the difference); align_max_m / automatic_align_max_m
+    are the alignment feature (padded max excursion). automatic_* is NaN for
+    a missed bout that was recovered by hand.
     """
-    cols = ['trial', 'rep', 'bout', 'walker', 'start_s', 'stop_s', 'measured_m']
+    auto_aligned, corrected = _upgrade_columns(auto_aligned), _upgrade_columns(corrected)
+    cols = ['trial', 'rep', 'bout', 'walker', 'start_s', 'stop_s', 'align_max_m']
     out = corrected.loc[corrected['manual'], cols].copy()
-    out['automatic_m'] = auto_aligned.loc[out.index, 'measured_m']
-    out['change_m'] = out['measured_m'] - out['automatic_m']
+    out['automatic_align_max_m'] = auto_aligned.loc[out.index, 'align_max_m']
+    out['align_change_m'] = out['align_max_m'] - out['automatic_align_max_m']
     if 'gait_duration_s' in corrected:      # snugged gait timing, both tables
         out['gait_start_s'] = corrected.loc[out.index, 'gait_start_s']
         out['gait_duration_s'] = corrected.loc[out.index, 'gait_duration_s']
@@ -2787,6 +2879,7 @@ def manual_changes(auto_aligned, corrected):
         out['walked_m'] = corrected.loc[out.index, 'walked_m']
         out['automatic_walked_m'] = (auto_aligned.loc[out.index, 'walked_m']
                                      if 'walked_m' in auto_aligned else np.nan)
+        out['walked_change_m'] = out['walked_m'] - out['automatic_walked_m']
     if 'stop_found' in corrected:
         out['stop_found'] = corrected.loc[out.index, 'stop_found']
     return out
@@ -2823,7 +2916,7 @@ class ManualScoring:
 
     resnug=True (default): a manual window is treated like button presses -
     the gait start/end are snugged inside it exactly as for automatic bouts
-    (snugged_bout), in the table, the figures and the drag editor.
+    (bout_sync_strides_steps), in the table, the figures and the drag editor.
     """
 
     ON_EXISTING = ('rescore', 'skip', 'clear')
@@ -2834,6 +2927,7 @@ class ManualScoring:
             previous.close_editors()
         self.feet, self.auto = feet, auto_aligned
         self.resnug = resnug
+        self.period = next(iter(feet.values())).period
         self.rescore_csv, self.manual_aligned_csv = (rescore_csv,
                                                      manual_aligned_csv)
         self.session_tag = session_tag
@@ -2898,8 +2992,9 @@ class ManualScoring:
         """Save every open editor's finished edits, then close its figure."""
         import matplotlib.pyplot as plt
         for ed in self.editors:
-            if getattr(ed, 'pending', None) and not getattr(ed, '_discarded',
-                                                            False):
+            pend = getattr(ed, 'pending', None)      # (person, [clicks]) in G3
+            if (pend and len(pend) > 1 and pend[1]   # armed AND a start clicked
+                    and not getattr(ed, '_discarded', False)):
                 raise RuntimeError(
                     f'trial {ed.trial}: a start was clicked without a stop - '
                     f'finish (or re-press rescore) before rerunning')
@@ -2965,6 +3060,72 @@ class ManualScoring:
             print(f'cleared {n} saved correction(s); reopening from the '
                   f'automatic bounds')
         return pairs
+
+    def _check_bout(self, trial, rep, person):
+        trial, rep, person = int(trial), int(rep), str(person).lower()
+        if person not in ('a', 'b') or rep not in (1, 2):
+            raise ValueError("person must be 'a' or 'b', rep 1 or 2")
+        a = self.auto
+        if not ((a['trial'] == trial) & (a['rep'] == rep)).any():
+            raise ValueError(f'trial {trial} rep {rep} is not in the table')
+        return trial, rep, person
+
+    def _report(self, trial, rep, person, verb):
+        c = self.corrected
+        sel = (c['trial'] == trial) & (c['rep'] == rep) & \
+              c['walker'].astype(str).str.endswith(person)
+        if not sel.any():
+            print(f'{verb} trial {trial} rep {rep} person {person.upper()}')
+            return None
+        r = c[sel].iloc[0]
+        if pd.isna(r['start_s']):
+            print(f'{verb} trial {trial} rep {rep} person {person.upper()}: '
+                  f'now a MISSED bout (no window)')
+        else:
+            print(f'{verb} trial {trial} rep {rep} person {person.upper()}: '
+                  f"window {r['start_s']:.2f}-{r['stop_s']:.2f} s -> walked "
+                  f"{r.get('walked_m', float('nan')):.2f} m (target "
+                  f"{r['distance_m']:g} m), gait {r.get('gait_duration_s', float('nan')):.1f} s"
+                  + ('' if r.get('stop_found', True) is not False else
+                     ', NO clear stop in that window'))
+        return r
+
+    def set_window(self, trial, rep, person, start, stop, units='s'):
+        """Type a bout's window - the full override, no clicking.
+
+        `start`/`stop` in session seconds (units='s') or as sample indices
+        (units='samples', the "absolute sample index" axis on the figures).
+        Saved like a Save press: the gait is snugged inside the window by the
+        same rule as every automatic bout, the table and the rep's figure are
+        rewritten. Works for matched AND missed bouts, and for a bout the
+        alignment attached to the wrong walk (see also unmatch()).
+        """
+        trial, rep, person = self._check_bout(trial, rep, person)
+        if units == 'samples':
+            start, stop = start * self.period, stop * self.period
+        elif units != 's':
+            raise ValueError("units must be 's' or 'samples'")
+        start, stop = float(start), float(stop)
+        if not (np.isfinite(start) and np.isfinite(stop) and 0 <= start < stop):
+            raise ValueError(f'need 0 <= start < stop, got {start}, {stop}')
+        self.close_editors()
+        save_manual_windows(self.rescore_csv, [dict(
+            trial=trial, rep=rep, person=person,
+            start_s=round(start, 3), stop_s=round(stop, 3))])
+        self.sync(trials=[trial])
+        return self._report(trial, rep, person, 'set')
+
+    def unmatch(self, trial, rep, person):
+        """Declare that this bout did NOT happen (or that the alignment
+        attached the wrong walk to it): it becomes a missed bout - window,
+        distances and gait timing cleared, `manual` = True. Undo with
+        clear([(trial, rep)]) or by set_window()."""
+        trial, rep, person = self._check_bout(trial, rep, person)
+        self.close_editors()
+        save_manual_windows(self.rescore_csv, [dict(
+            trial=trial, rep=rep, person=person, start_s=np.nan, stop_s=np.nan)])
+        self.sync(trials=[trial])
+        return self._report(trial, rep, person, 'unmatched')
 
     def clear(self, pairs):
         """Delete the saved corrections of these (trial, rep) pairs (bare
@@ -3036,5 +3197,6 @@ class ManualScoring:
         """Open the click-to-rescore figure for each (trial, rep)."""
         return self._open(pairs, lambda t, r: manual_correct(
             self.feet, self.corrected, [(t, r)],
-            session_tag=self.session_tag, out_csv=self.rescore_csv, **kwargs),
+            session_tag=self.session_tag, out_csv=self.rescore_csv,
+            resnug=self.resnug, **kwargs),
             on_existing)

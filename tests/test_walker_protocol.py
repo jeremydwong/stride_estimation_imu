@@ -17,7 +17,7 @@ class WalkerProtocolTests(unittest.TestCase):
         self.aligned = pd.DataFrame(dict(
             trial=[13, 13, 13, 13, 14], rep=[1, 1, 2, 2, 1], bout=[1, 2, 1, 2, 1],
             distance_m=[2.5] * 5, snip=[0., 1., 2., 3., np.nan],
-            measured_m=[2.3, 3.3, 2.6, 2.4, np.nan],
+            align_max_m=[2.3, 3.3, 2.6, 2.4, np.nan],
             walker=['left_foot_a', 'left_foot_a', 'left_foot_b', 'left_foot_a', '']))
         self.result = {'measured': self.measured, 'aligned': self.aligned,
                        'missed': self.aligned.iloc[[4]]}
@@ -30,7 +30,7 @@ class WalkerProtocolTests(unittest.TestCase):
         out = bf.assign_walkers_by_protocol({}, self.result)['aligned']
         self.assertEqual(out['walker'].tolist()[:4],
                          ['left_foot_a', 'right_foot_b', 'left_foot_b', 'left_foot_a'])
-        np.testing.assert_allclose(out['measured_m'][:4], [2.3, 1.8, 2.6, 2.4])
+        np.testing.assert_allclose(out['align_max_m'][:4], [2.3, 1.8, 2.6, 2.4])
         self.assertEqual(out['walker_changed'].tolist(),
                          [False, True, False, False, False])
         self.assertEqual(out['walker_auto'][1], 'left_foot_a')

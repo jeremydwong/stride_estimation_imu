@@ -2,6 +2,102 @@
 
 A Python library for estimating walking strides and gait parameters from IMU (Inertial Measurement Unit) sensor data.
 
+## How deep is the mechanization?
+
+The integration loop — gyro → orientation → gravity-free acceleration →
+velocity with zero-velocity updates → position — is **one function**,
+`stride_imu.inertial.compute_position()` (`src/stride_imu/inertial.py`),
+one foot at a time. Everything else is a wrapper that ends there. Counting
+the calls *below* the function you type:
+
+| You type | Calls below it, down to the loop | Depth |
+| --- | --- | --- |
+| `imu.compute_position_two_imus(L.Wb, L.Ab, R.Wb, R.Ab, period)` — the playground cell; the engine under every figure | `compute_position_two_imus` → `compute_position` | **1** |
+| `align_snips_to_trial_table(...)` — section C: which walk is which trial | → `snip_distances` → `compute_position` | 2 |
+| `add_gait_timing(...)` — the gait-timing columns of the table | → `bout_sync_strides_steps` → `process_bout` → `compute_position_two_imus` → `compute_position` | 4 |
+| `inspect_snipped_trial(...)`, `save_trial_figures(...)`, the drag editor — one scored bout, drawn | → `_build_inspect_figure` → `_render_inspect_block` → `bout_sync_strides_steps` → `process_bout` → `compute_position_two_imus` → `compute_position` | 6 |
+
+The bout pipeline (all in `src/brock_functions.py`) has three layers above
+the engine, each adding one decision and none re-implementing integration:
+`process_bout` cuts the window and runs both feet + stride segmentation;
+`bout_sync_strides_steps` finds walk onset + the stance lead-in, applies the
+manual-vs-automatic snugging rule, snugs the start/end (extending an automatic
+window until a true stop) and re-runs on the trimmed window, and builds the
+step train; `_render_inspect_block` draws it.
+
+## A new session = a copy of the s07_s08 notebook
+
+There is no notebook generator. For a new session, copy
+`notebooks/demo_brock_s07_s08_auto.ipynb`, rename it, and change the
+**EDIT HERE** lines in its configuration cell: `SESSION_TAG`, the `.h5`
+filename/date, the trial-table sheet or CSV, and `FIRST_WALKER` (who walks
+first in rep 1). Everything else — alignment, figures, manual scoring, the
+tables — is shared library code in `src/`, so the copy stays current when
+the library changes.
+
+## The bout table — what each column means
+
+`brock_<tag>_auto_aligned.csv` (section E) and `brock_<tag>_manual_aligned.csv`
+(section G) have **one row per expected bout**: 48 trials × 2 reps × 2 bouts.
+Two kinds of distance live here, and keeping them apart avoids most confusion:
+`align_max_m` is a crude number we need **before** analysis just to work out
+which snip is which trial; `walked_m` (with `gait_duration_s`) is the actual
+measurement made **after** the bout is identified and snugged.
+A missed bout (no button presses matched it) keeps its identity columns and
+has NaN everywhere else. Times are **session seconds** (sample index × period).
+
+**Identity** — from the trial table (section B)
+
+| Column | Meaning |
+| --- | --- |
+| `trial` | trial-table row, 1–48 |
+| `rep` | 1 or 2. The session is rep-major: all 48 trials once, then all 48 again |
+| `bout` | 1 or 2 within the trial-rep: who walked first. Bout 1 is `FIRST_WALKER` in rep 1; rep 2 flips |
+| `distance_m` | **target** walk distance from the trial table |
+| `package`, `package_code` | package size as written / coded ring=1 small=2 medium=3 large=4 |
+| `status` | the experimenter's note for that rep (e.g. "did not hold box"); blank if none |
+
+**Matching** — section C, `align_snips_to_trial_table` + `assign_walkers_by_protocol`
+
+| Column | Meaning |
+| --- | --- |
+| `snip` | index of the Start/Stop press pair matched to this bout; NaN = missed |
+| `start_s`, `stop_s` | the bout **window**: the button presses (or inferred stop), or your manual window after a correction. Only a search window — the gait is snugged inside it |
+| `duration_s` | `stop_s − start_s` (window length, not gait length) |
+| `inferred` | the Stop was inferred from the feet because it was never clicked |
+| `align_max_m` | the **alignment feature**, computed *before* any bout is identified: the largest horizontal excursion of any single foot over the press window ± 1 s. Used only to line the snips up against the trial table. It includes pre/post-walk motion and standing drift, so it runs larger than the walk — *not* the analysis distance (see `walked_m`). (Was `measured_m` before 2026-10-02; old CSVs still load.) |
+| `align_error_m` | `align_max_m − distance_m`, the alignment residual (was `distance_error_m`) |
+| `walker` | foot label of the walker (`left_foot_a` …); the suffix `a`/`b` is the person. The protocol rule picks the person; the label is that person's farther-moving foot |
+| `walker_auto`, `walker_changed` | the farthest-foot guess the alignment made, and whether the protocol rule overrode it |
+| `reaction_s` | Start press → snugged gait start. Negative = already walking when the button was pressed |
+| `jumped_gun` | `reaction_s < 0` |
+
+**Gait timing** — section C, `add_gait_timing` (the same snugging the figures draw)
+
+| Column | Meaning |
+| --- | --- |
+| `gait_start_s`, `gait_end_s`, `gait_duration_s` | the snugged gait: valley before the first committed swing → last landing completed inside the window. `t = 0` in every bout plot is `gait_start_s` |
+| `stop_found` | a true stop (both feet still ≥ 0.25 s, within 1.5 s) follows the gait end |
+| `end_extended_s` | how far an *automatic* window had to be extended past the Stop press to find that stop (0 = not needed). Manual windows are never extended, only flagged |
+| `walked_m` | **the result**: the walk as drawn — snugged gait, mean of both feet, gait start → farthest footfall. Use this for analysis |
+| `walked_error_m` | `walked_m − distance_m`: how far the walk was from the target |
+| `came_back` | the window also contains a walk back after a turn — the end needs checking (red title in the figure) |
+
+**Manual** — `manual_aligned.csv` only
+
+| Column | Meaning |
+| --- | --- |
+| `manual` | True where a saved correction replaced `start_s`/`stop_s` (distances and gait timing recomputed for that row) **or marked the bout as not happened** (`unmatch`: window, distances and gait all NaN) |
+
+The corrections file `brock_<tag>_manual_rescore.csv` is just
+`trial, rep, person (a/b), start_s, stop_s` — one row per corrected bout, the
+latest save wins. It is written by the two editors' Save buttons, by
+`scoring.set_window(trial, rep, person, start, stop, units='s'|'samples')`
+(type a window, no clicking) and by `scoring.unmatch(trial, rep, person)`
+(a row with both times empty = this bout did not happen). Because every
+manual decision goes through this one file, anything the alignment decided
+can be overridden per bout without re-running it.
+
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/jeremydwong/stride_estimation_imu/blob/main/notebooks/demo_colab_one_foot.ipynb) Single Foot Demo
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/jeremydwong/stride_estimation_imu/blob/main/notebooks/demo_colab_two_feet_head_exphand.ipynb) Two Feet + Head Demo

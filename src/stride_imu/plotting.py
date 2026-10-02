@@ -477,7 +477,8 @@ def draw_event_timeline(aligned, events, report=None, rows=6, figsize=(14, 13),
     inferred = (aligned['inferred'].to_numpy(bool) if 'inferred' in aligned
                 else np.zeros(len(aligned), bool))
     exp = aligned['distance_m'].to_numpy(float)
-    meas = aligned['measured_m'].to_numpy(float)
+    col = 'align_max_m' if 'align_max_m' in aligned else 'measured_m'  # old tables
+    meas = aligned[col].to_numpy(float)
     counts = pair_status(aligned)
 
     ev_t = np.asarray(events['time_s']) / 60.0
@@ -550,7 +551,7 @@ def draw_event_timeline(aligned, events, report=None, rows=6, figsize=(14, 13),
         mm = win & ~missed & ~inferred
         ax.plot(t_min[mm], meas[mm], 'o', color=TIMELINE_COLORS['measured'],
                 ms=4.5, mec='white', mew=0.6,
-                label='measured' if r == 0 else None, zorder=5)
+                label='align max (single-foot excursion)' if r == 0 else None, zorder=5)
         # bouts whose Stop was inferred from the feet settling, not clicked
         mi = win & ~missed & inferred
         ax.plot(t_min[mi], meas[mi], 'D', mfc='none',

@@ -958,3 +958,162 @@ still misbehaves it is a separate issue (need its error text).
   Cached CSVs/figures in Dropbox are stale until the notebook is rerun (C, E, F).
 - Students' trial 7 r1 (8.4 m) / trial 12 r1 numbers do NOT match s07_s08
   (13.1 m / clean) — they are on another session; not reproduced.
+
+### 2026-10-01 — FEEDBACK (first real student feedback on the s07_s08 notebook)
+
+Comments verbatim-ish, each with its status. Most were addressed in commit
+`369fb67` (made in another session); reviewed here: 40/40 tests pass, all
+notebook cells parse, START_FRESH is consumed in G0 (file -> .bak-<date>) and
+G1 (clear_all removes the _viz_manual figures), drag/click default to
+on_existing='rescore'.
+
+1. "Running G2/G3 just runs ad infinitum - seems to happen if that trial was
+   already manually adjusted." — DONE (369fb67). It was the blocking
+   `input()` skip/rescore/clear prompt (invisible in VS Code). Removed: an
+   already-corrected trial-rep now simply reopens WITH its saved corrections.
+2. "Would be nice to manually fix multiple times / we rescored A but not B
+   and can't pull it up again." — DONE. Reopen as often as you like; Save
+   replaces only the person you changed. `scoring.clear(pairs)` puts a rep
+   back to automatic.
+3. "Best way to run from a clean state without manual edits?" — DONE.
+   `START_FRESH = True` in G0 (scoring mode) or `scoring.clear_all()`: the
+   corrections file is renamed `.bak-<timestamp>` (rename back to undo), the
+   `_viz_manual.svg` files are removed. The automatic table (E) is never
+   touched by manual scoring.
+4. "Target distance plotted in G2/G3 for a sanity check?" — DONE. Dashed
+   target line on both overheads (G2 / saved figures) and on the excursion
+   panel (G3); target in every title.
+5. "If trial 1 is not found, how can we be confident G3 pulls up the actual
+   trial 1?" — DONE. Missed bouts before the first match were placed ON the
+   first match (np.interp clamps) so G3 showed trial 2; edge bouts are now
+   extrapolated by the median bout spacing. The G3 figure shows the other
+   trials' bouts (grey, labelled "T2 r1 b1 A"), the Start/Stop presses, and
+   the missed bout's estimated position (red dashed).
+6. ".svg: approach trajectory x-axis -1..1, return -2..2" — DONE (labels).
+   Both panels are the SAME walk (true scale / lateral stretched), not
+   approach vs return; they are now titled so.
+7. "In G2, made a fix, figures update but measured distance did not." —
+   DONE. The title now shows `walked X m (as drawn)` from `imu.overhead_travel`
+   (snugged gait, mean of both feet, start -> farthest footfall), recomputed
+   on every drag; `walked_m` / `came_back` columns in the tables. `measured_m`
+   ("snip max" in the title) is the alignment feature — single-foot max
+   excursion over the PADDED button window — and is meant to differ.
+8. "Trial 7, rep 1, person A, measured 8.4 but looks closer to 7 m; measured
+   often doesn't match the trajectory." — RESOLVED, and it was TRIAL 8: the
+   only bout in the session with measured ~8.4 is trial 8 rep 1 bout 1
+   (person A, target 8.0): snip max 8.36 m, walked 7.09 m as drawn. The
+   snip max is inflated by foot drift after the walk (e.g. t7 r1 b1: 13.1 m
+   snip max, peak 4 s after the gait end, walked 11.5). Item 7's title fix
+   is the answer. NOTE the student's trial numbering was off by one here.
+9. "Trial 12, rep 1, person A+B, weird drift or step, funky situation." —
+   NOT REPRODUCED. Re-rendered trial 12 rep 1 with the Sep-27 code they had
+   (git worktree at 6a41b51) and with current code: both bouts clean (15/16
+   steps, walked 10.7/10.8 m vs 12 target, stop found, no walk-back). The
+   overview strip does show A's un-clicked return walk and a slow ~0.5 m/s
+   drift hump in A's standing foot between the bouts - possibly what they
+   meant; it does not affect either scored bout. Given item 8's off-by-one,
+   ask whether they meant trial 13 rep 1 (the misassigned-walker case, since
+   fixed by the protocol rule, and the one with a saved manual correction),
+   or trial 8 rep 1 bout 2 (the old flipped/collapsed overhead of a bout
+   containing the walk back — exactly what 369fb67's farthest-footfall aim
+   + red "walked back after a turn" flag fixed).
+
+### 2026-10-02 — FEEDBACK round 2 + the three changes from the depth review
+
+Second batch of student questions (same notebook), with answers; then the
+code changes (user-directed: "do all three").
+
+**Feedback 2**
+1. "Corrected Walk 1 Person A in G3, saved; Walk B wasn't shown afterwards;
+   G2 then said the trial was already corrected though B wasn't." — Same
+   root cause as round 1 item 1 (the blocking skip/rescore/clear prompt,
+   default skip). Verified the exact flow on real data: G3 fix A -> save ->
+   rerun G3 same pair reopens WITH A's window and B still scorable (message
+   names the saved person) -> fix B -> save -> CSV holds both rows; G2 on the
+   same pair reopens too; no prompt anywhere. Found+fixed a related bug while
+   testing: pressing 'rescore B' and then rerunning a cell WITHOUT clicking
+   raised "a start was clicked without a stop" (an armed button with no
+   click counted as pending). close_editors now blocks only when a start was
+   actually clicked.
+2. "When G2/G3 keeps running, what is it doing? wait or stuck?" — It was
+   waiting on input(); nothing to wait for. No prompt exists now. Answer
+   written into the section-G markdown ("Answers to the first round").
+3. "How is total measured distance calculated; why no update after a manual
+   change?" — It was `measured_m` = alignment feature from the button
+   window; now `walked_m` in titles/tables, recomputed on every drag/save.
+   Explained in C and G markdown.
+4. "In G3, show measured/target while correcting?" — DONE: after the 2nd
+   click the status line shows "walked ≈ X m (target Y m)" for the clicked
+   window, computed by the same pipeline (bout_sync_strides_steps, manual,
+   resnug) that fills the table, + "no clear stop in this window" when so.
+   `_RescoreFigure._walked_note`; manual_correct/_RescoreFigure gained
+   `resnug=`; ManualScoring.click passes it.
+
+**The three changes**
+- (1) `snugged_bout` MERGED into `bout_sync_strides_steps(..., manual=,
+  resnug=, snug_abs=, end_overridden=)`: the old body is a nested
+  `attempt(i1)`; the flag translation + stop-extension loop live in the same
+  function. Depth to compute_position: add_gait_timing 4 (was 5), figures 6
+  (was 7); README table updated. `force_snug_abs`/`snug_end_enabled` are no
+  longer public parameters (examples pass only initial_separation/anchor_mode).
+- (2) G0 load mode no longer raises FileNotFoundError when there is no
+  corrections file: prints a note and continues with the automatic table
+  (Run-All safe for a new student).
+- (3) RENAME (user: "measured" reads as the result; "snip_max" also
+  confusing): `measured_m` -> **`align_max_m`**, `distance_error_m` ->
+  `align_error_m`; `snip_distances` output column `distance_m` ->
+  `align_max_m` (it was colliding with the TARGET's name); manual_changes:
+  `automatic_m`/`change_m` -> `automatic_align_max_m`/`align_change_m`, +
+  `walked_change_m`; add_gait_timing adds `walked_error_m`. Titles say
+  "align max". `_upgrade_columns()` (OLD_COLUMN_NAMES) maps old names on
+  every table-consuming entry point, so cached CSVs from before today still
+  load (verified with the Dropbox auto_aligned.csv). Omnibus legend: "align
+  max (single-foot excursion)". Notebooks s07_s08 / s05_s06 / dataset2 and
+  the generator patched (source only; saved outputs still show old headers
+  until rerun); s07_s08 bout_speed_mps is now walked_m / gait_duration_s.
+  Framing (user's, confirmed correct): one crude distance is needed BEFORE
+  analysis to align snips to trials; the real distance/time measurement
+  comes AFTER identification and snugging - two different quantities.
+  README "bout table" section rewritten around that; G0 table shows
+  auto/manual WALKED, not align max.
+- Verified: 40/40 tests; nbconvert G0(load)+H end to end on a rebuilt
+  alignment (new columns); the G3/G2 flow above.
+
+### 2026-10-02 (later) — full override: type a window, or unmatch a bout
+
+- User: "can scoring.click() take two timepoints or frame numbers? what if
+  the alignment screwed up?" The corrections CSV was already the override,
+  but its only writer was a mouse, and nothing could say "this bout did not
+  happen" — so a snip the alignment pinned on the WRONG trial could not be
+  removed. Added:
+  - `ManualScoring.set_window(trial, rep, person, start, stop, units='s'|
+    'samples')` — writes the window through save_manual_windows, syncs
+    (snugged by the same rule, table + rep figure rewritten), prints the
+    resulting walked/gait. Seconds vs samples verified identical on real data.
+  - `ManualScoring.unmatch(trial, rep, person)` — a corrections record with
+    BOTH times empty = "no bout": apply_manual_rescore turns the row back
+    into a missed bout (snip/window/align/gait/walked NaN, flags cleared,
+    walker kept so it stays addressable, manual=True); refresh_manual_
+    distances skips it; add_gait_timing clears gait columns of in-scope rows
+    without a window (they used to keep the automatic values). Undo with
+    clear() or set_window(). Verified on trial 45 rep 2 bout 2 (the known
+    junk snip).
+  - Notebook cell **G4** (TYPED_WINDOWS / UNITS / UNMATCH, guarded like
+    G1-G3) + G markdown "What if the alignment itself got it wrong?" (how to
+    spot it: align_error_m, figure with no steps, res['extra']; fix per bout
+    with unmatch + set_window, or retune TIME_WEIGHT and rerun C). README
+    corrections-file paragraph + `manual` row updated.
+- User: drag vs click had different list CONSTANTS (INTERACTIVE_INSPECT vs
+  MANUAL_INSPECT) on top of different function names. Both cells now use
+  `TRIALS`, `PAD_S`, `PLOT_EVERY` (manual_correct already took pad_s); all
+  prose references updated.
+- 41/41 tests (new: set_window s/samples, unmatch + undo, no-bout record
+  validation).
+- **Deleted `scripts/make_brock_session_notebook.py`** (user: no value;
+  new sessions are a copy of the s07_s08 notebook with the EDIT HERE config
+  lines changed). README says so. Nothing imported it; CLAUDE.md history
+  mentions remain as history.
+- **Deleted `scripts/make_brock_session_notebook.py`** (user: no value;
+  new sessions are a copy of the s07_s08 notebook with the EDIT HERE config
+  lines changed). README says so. Nothing imported it; CLAUDE.md history
+  mentions remain as history.
