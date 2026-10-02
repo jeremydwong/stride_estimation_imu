@@ -24,6 +24,13 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [dependency-groups]
+# Live experiment GUI (stride_imu.live.app): `uv sync --group live`
+live = [
+    "PySide6>=6.7",
+    "pyqtgraph>=0.13.7",
+    "opencv-python>=4.9,<4.12",   # webcam capture; <4.12 keeps numpy 1.26 compatible
+    "imageio-ffmpeg>=0.5",        # fallback ffmpeg binary if none on PATH
+]
 dev = [
     "ipykernel>=7.3.0",
     "ipympl>=0.10.0",

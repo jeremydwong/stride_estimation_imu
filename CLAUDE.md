@@ -924,6 +924,58 @@ still misbehaves it is a separate issue (need its error text).
   module; re-applied after G1's importlib.reload), C prints counts + the list
   of bouts to check, G0/H tables show stop_found. Tests: StopAfterTests.
 
+### 2026-09-29 (evening) — live streaming from the Opals (APDM_live_design.md)
+
+- Research + report `APDM_live_design.md`. Key facts: sessions so far are
+  SYNCHRONIZED LOGGING (Wireless Protocol 1), 6 Opals incl. an 'event' clicker
+  whose button presses become the Start/Stop annotations. APDM's SDK is inside
+  Motion Studio (`libapdm.dylib` x86_64 only + `apdm.jar`); official Python
+  binding is 2.7-only.
+- `bridge/ApdmBridge.java` (+ `scripts/build_apdm_bridge.sh`): runs on Motion
+  Studio's bundled x86_64 JRE (Rosetta), streams a text line protocol to
+  Python; modes probe/configure/stream; live button events, sync-box input,
+  AP GPIO out. Verified up to "no access point found" — NOT yet run on hardware.
+- `stride_imu.live`: `LiveFoot` = causal compute_position, BIT-IDENTICAL to
+  offline (tests/test_live_mechanize.py); footfalls decided T_FF (0.4 s) after
+  the stance plateau ends. ~35 us/sample, 4 feet ~2% of a core — no C needed.
+  `ReplaySource` (session .h5 in real time), `BridgeSource`, `HdfRecorder`
+  (APDM v5 layout, existing loaders read it), `LivePipeline`, `LiveViewer`.
+  CLI `scripts/live_feet.py --replay H5 | --apdm [--configure]`.
+- Open: day-1 hardware checks in the report (sync-time units of button
+  events, gpio AP id vs index, latency/range); bout-level analysis at the
+  Stop event is the natural next step.
+
+### 2026-09-29 (night) — live experiment console
+
+- No SDK path writes events TO an Opal (checked every jar class/lib export);
+  cue Start/Stop are stamped in the Opal clock (`live/clock.SensorClock`,
+  min-latency offset) into session.h5 Annotations (Sensor ID 0, bare
+  'Start'/'Stop') + events.csv; optional AP GPIO pulse. Clicker Opal presses
+  stay on-device as the backup.
+- `scripts/live_experiment.py` + `stride_imu.live.app` (PySide6 + pyqtgraph,
+  `uv sync --group live`): Opal->role dialog with live activity bars; per
+  person |accel| + zeroable overhead footfalls (per-foot heading from the
+  farthest finalized footfall); DAW-style cue lanes; pause / prev / restart /
+  next trial (attempt counter); notes; link-health table.
+  `live/schedule.py` (build_brock_schedule, Conductor), `live/audio.py`
+  (`say` clips, QSoundEffect). BrockTiming defaults are GUESSES — the
+  protocol's real cue timing is still to be set. Tests: test_live_schedule,
+  test_live_app (offscreen).
+- **Webcam** (`live/video.py`, console `--camera N`): capture thread -> bounded
+  queue (drops, never blocks) -> writer -> ffmpeg h264_videotoolbox,
+  30-min fragmented-MP4 segments rotated by frame count, video_frames.csv
+  (host_s + Opal-clock sensor_us per frame), burned-in stamp, GUI preview +
+  status. Verified with SyntheticCamera (segment counts == ffprobe; hard-kill
+  of the encoder recovers). Real webcam not yet exercised. opencv-python
+  pinned <4.12 (numpy 1.26). tests/test_live_video.py.
+- **Consolidated (user-directed): all live code is in `src/stride_imu/live/`**
+  — `README.md` (was APDM_live_design.md at the root), `bridge/` (was root
+  `bridge/`), `scripts/` (live_feet.py, live_experiment.py,
+  build_apdm_bridge.sh; were in root `scripts/`). Only tests stay outside
+  (`tests/test_live_*.py`). Run e.g. `uv run python
+  src/stride_imu/live/scripts/live_experiment.py ...`. Earlier log lines use
+  the old paths.
+
 ### 2026-10-01 — student feedback on section G (s07_s08 notebook)
 
 - **G2/G3 "runs forever" = the input() prompt** in ManualScoring for trials with
