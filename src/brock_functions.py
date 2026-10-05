@@ -63,6 +63,10 @@ def walker_for(trial, bout):
 def process_bout(feet, subject, i0, i1, period, pad_seconds=PAD_SECONDS):
     """Slice both of the subject's feet (with padding), run the stride pipeline.
 
+    LEGACY: used only by the dataset-1 example scripts. The Brock bout path
+    (bout_sync_strides_steps) does not use it - it calls
+    compute_position_two_imus directly and computes no strides.
+
     Returns a dict with walk_info and strides for both feet plus summary
     metrics. Distances are net horizontal displacement of each foot trajectory
     over the scored bout (the padding is excluded by construction: the foot is
@@ -138,6 +142,102 @@ STOP_SEARCH_S = 1.5
 STOP_EXTEND_STEP_S = 1.0
 STOP_EXTEND_MAX_S = 3.0
 
+# Fix A (2026-10-03, Hallee's review: 22 walk-back bouts): an AUTOMATIC bout
+# whose gait reverses direction (>= WALKBACK_MIN_BACK_STEPS footfalls stepping
+# back along the foot's own direction of travel) or that lasts more than
+# WALKBACK_TIME_RATIO x the time its target distance needs (target /
+# NORMAL_WALK_MPS + 1 s) ends at the TURN - the farthest-forward footfall - and
+# is never extended looking for a stop (the stop it finds is after the walk
+# back). Manual/dragged ends are only flagged.
+WALKBACK_CUT = True
+WALKBACK_MIN_BACK_STEPS = 2
+WALKBACK_TIME_RATIO = 1.4
+NORMAL_WALK_MPS = 1.25
+
+# Fix B (2026-10-03, missed first steps): the onset search never reached more
+# than gravity_seconds (1 s) before the Start press, but walkers often start
+# earlier (the press was not a go cue). For an AUTOMATIC bout, if committed
+# swings (>= the snug threshold, either foot) run back-to-back into the
+# detected gait start with gaps <= CHAIN_GAP_S, the search restarts at the
+# first of them, at most CHAIN_MAX_S before that start. Not a plain threshold:
+# a blanket 3 s search pulled 12/72 clean bouts onto pre-walk activity.
+CHAIN_BACK = True
+CHAIN_GAP_S = 0.6
+CHAIN_MAX_S = 3.0
+
+
+def _foot_speeds(feet, subject, a, b, period):
+    """|V| of both of the subject's feet mechanized over [a, b); None if the
+    window cannot be mechanized (e.g. no stance in it)."""
+    out = {}
+    try:
+        for side in ('left', 'right'):
+            rec = feet[(subject, side)]
+            with contextlib.redirect_stdout(io.StringIO()):
+                out[side] = imu.compute_position(rec.Wb[a:b], rec.Ab[a:b],
+                                                 period).Vm
+    except Exception:
+        return None
+    return out
+
+
+def chain_back_start(feet, subject, i0, t0, period):
+    """Fix B. Earliest start of an unbroken chain of committed swings that
+    runs into the gait start t0 (absolute samples), or None. Swings = runs of
+    either foot's speed >= DEFAULT_START_FOOTSPEED_HIGH; consecutive swings
+    (and the last one to t0) are <= CHAIN_GAP_S apart; at most CHAIN_MAX_S
+    before t0."""
+    a = max(0, min(i0, t0) - int(round((CHAIN_MAX_S + 1.0) / period)))
+    V = _foot_speeds(feet, subject, a, t0 + 1, period)
+    if V is None:
+        return None
+    from stride_imu.inertial import DEFAULT_START_FOOTSPEED_HIGH as hi
+    fast = (V['left'] >= hi) | (V['right'] >= hi)
+    d = np.diff(np.r_[0, fast.astype(int), 0])
+    runs = [(s0 + a, e0 + a) for s0, e0 in zip(np.flatnonzero(d == 1),
+                                               np.flatnonzero(d == -1))
+            if e0 + a <= t0]
+    gap, far = int(round(CHAIN_GAP_S / period)), int(round(CHAIN_MAX_S / period))
+    start, last = None, t0
+    for s0, e0 in reversed(runs):
+        if last - e0 > gap or t0 - s0 > far:
+            break
+        start, last = s0, s0
+    return start
+
+
+def walkback_info(res, period, expected_m=None):
+    """Fix A detector on one pipeline result. Returns (detected, back_steps,
+    turn_abs, time_ratio). Per foot, footfalls after the gait start are
+    projected on that foot's own initial direction of travel (first footfall
+    -> first footfall > 0.5 m away; short 2.5 m walks give few footfalls);
+    back steps = later footfalls that move back > 0.15 m. turn_abs = the later of the two feet's farthest-forward
+    footfalls (absolute sample)."""
+    j0, tr = res['slice'][0], res['t_ref']
+    back, turns = 0, []
+    for side in ('left', 'right'):
+        ff = np.asarray(res['sides'][side]['ff_idx'], int)
+        ff = ff[ff >= tr]
+        if len(ff) < 2:
+            continue
+        P = res[f'{side}_info'].P[ff, :2]
+        d0 = P - P[0]
+        far = np.flatnonzero(np.linalg.norm(d0, axis=1) > 0.5)
+        if not far.size:
+            continue
+        ref = d0[far[0]] / np.linalg.norm(d0[far[0]])
+        proj = d0 @ ref
+        k = int(np.argmax(proj))
+        back += int(np.sum(np.diff(proj[k:]) < -0.15))
+        turns.append(j0 + int(ff[k]))
+    gait = (res['end_abs'] - res['t0_abs']) * period
+    ratio = (gait / (expected_m / NORMAL_WALK_MPS + 1.0)
+             if expected_m is not None and np.isfinite(expected_m) and expected_m > 0
+             else np.nan)
+    detected = bool(back >= WALKBACK_MIN_BACK_STEPS
+                    or (np.isfinite(ratio) and ratio > WALKBACK_TIME_RATIO))
+    return detected, back, (max(turns) if turns else None), ratio
+
 
 def stop_after(feet, subject, end_abs, period):
     """Did the walker come to a TRUE stop after the gait end `end_abs`?
@@ -162,194 +262,269 @@ def stop_after(feet, subject, end_abs, period):
     return bool(run[:int(round(STOP_SEARCH_S / period)) + 1].any())
 
 
+def _onset_and_snip(feet, subject, i0, i1, period, gravity_seconds):
+    """Walk onset + standing lead-in for a search window starting at i0.
+
+    From the subject's RAW stillness (|gyro| < STILL_RAD_S on either foot =
+    moving). onset: first moving sample at/after i0 - but if a foot is
+    already mid-swing AT i0 (jumped the gun / late press), walk back to that
+    motion run's start. lead: consecutive BOTH-feet-still samples just before
+    onset, up to gravity_seconds, allowed to cross i0 (the true side-by-side
+    stance often sits just before the Start press). The kept standing is
+    pinned as stance by the mechanization's own footfall criterion, so the
+    first stride's drift correction averages gravity over real standing.
+    (detect_quiet_time is NOT used: it is a bias-window hunter that demands
+    1.5 s runs, misses short genuine stances, and can even place "onset"
+    after the first swing.) Returns (onset, snip), absolute samples."""
+    grav = int(round(gravity_seconds / period))
+    a0 = max(0, i0 - grav)                       # search floor
+    b0 = min(i1, i0 + int(round(5.0 / period)))  # onset must be near i0
+    moving = np.zeros(b0 - a0, bool)
+    for side in ('left', 'right'):
+        Wm = np.linalg.norm(feet[(subject, side)].Wb[a0:b0], axis=1) / period
+        moving |= Wm >= STILL_RAD_S
+    click = i0 - a0
+    if moving[click]:                            # mid-swing at i0
+        run = np.flatnonzero(~moving[:click][::-1])
+        onset = i0 - (int(run[0]) if len(run) else click)
+    else:
+        after = np.flatnonzero(moving[click:])
+        onset = i0 + (int(after[0]) if len(after) else b0 - i0)
+    still_before = ~moving[:onset - a0]
+    run = np.flatnonzero(~still_before[::-1])
+    lead = min(grav, int(run[0]) if len(run) else len(still_before))
+    return onset, max(0, onset - lead)
+
+
+def find_straight_gait_window(feet, subject, i0, i1, period, manual=False,
+                              resnug=True, snug_abs=None, end_overridden=False,
+                              expected_m=None, gravity_seconds=1.0):
+    """EVERY decision about where a bout starts and ends, in one place - and
+    the window it returns is ONE STRAIGHT WALK: reversals are rejected.
+
+    A bout is a single walk in one direction, start to stop. If the walker
+    turns and walks back inside the window (a hand-off followed by the
+    return), that reversal is not part of the gait: an automatic bout is cut
+    at the turn - the farthest-forward footstep - and is never extended past
+    it looking for a stop; a manual window is left as the scientist set it
+    but flagged (walkback_steps). See walkback_info for how a reversal is
+    detected (footsteps stepping back along each foot's own direction, or a
+    duration far beyond what the target distance needs).
+
+    Runs BEFORE the analysis (compute_position_two_imus + steps_from_footfalls,
+    in bout_sync_strides_steps), which then runs once on the window decided
+    here and never moves it. To decide, this looks at foot speeds and
+    footstep positions from compute_position_two_imus runs on candidate
+    windows (the same engine call the analysis makes).
+
+    In order:
+      1. onset + standing lead-in (_onset_and_snip) from raw gyro stillness;
+      2. Fix B, CHAIN_BACK (automatic only): if real steps run back-to-back
+         into the gait start from before the search window, restart the
+         search at the first of them;
+      3. gait START: snug_start - the foot-speed valley before the first
+         committed swing (or pinned: resnug=False manual windows);
+      4. gait END: snug_end - the last landing completed inside the window
+         (looked for on a run END_LOOKAHEAD_S past the window, so a swing
+         cut off at the edge is not mistaken for a landing);
+      5. Fix A, WALKBACK_CUT: reversals rejected - an automatic bout that
+         walks back after the turn ends at the turn, no extension (manual:
+         flagged only);
+      6. stop check: an automatic window with no true stop after the end is
+         extended STOP_EXTEND_STEP_S at a time up to STOP_EXTEND_MAX_S; if no
+         stop is found the original window is kept, flagged.
+    Manual windows are never extended or cut, only flagged; resnug=True
+    (default) treats a manual window like button presses (steps 3-4 apply).
+
+    Returns a dict of absolute samples and flags: snip (first sample
+    analysed, incl. the standing lead-in), onset, start (gait start = t=0),
+    start_from ('snug' | 'pinned' | 'onset' when no committed swing was
+    found), end (last gait sample, inclusive), end_foot, stop_found, end_extended_s,
+    stop_searched_s, walkback_cut, walkback_steps, chain_back_s.
+    """
+    i0, i1 = int(i0), int(i1)
+    force_start = None if resnug else (snug_abs if snug_abs is not None
+                                       else (i0 if manual else None))
+    snug_end_on = resnug or not (manual or end_overridden)
+    automatic = not manual and not end_overridden and force_start is None
+    may_extend = snug_end_on and not manual and not end_overridden
+    n_rec = min(len(feet[(subject, s)].Wb) for s in ('left', 'right'))
+    lookahead = int(round(END_LOOKAHEAD_S / period))
+    lf, rf = feet[(subject, 'left')], feet[(subject, 'right')]
+
+    def decide(stop, search_from):
+        """Start/end of the gait for the search window [search_from, stop)."""
+        onset, snip = _onset_and_snip(feet, subject, search_from, stop, period,
+                                      gravity_seconds)
+        L, R = imu.compute_position_two_imus(lf.Wb[snip:stop], lf.Ab[snip:stop],
+                                             rf.Wb[snip:stop], rf.Ab[snip:stop],
+                                             period)
+        if force_start is not None:
+            start, start_from = int(np.clip(force_start, snip, stop - 1)), 'pinned'
+        else:
+            g, _ = imu.snug_start(L, R)
+            start, start_from = ((snip + g, 'snug') if g is not None
+                                 else (onset, 'onset'))
+        end, end_foot = stop - 1, None
+        if snug_end_on:
+            ext_stop = min(n_rec, stop + lookahead)
+            eL, eR = ((L, R) if ext_stop <= stop else
+                      imu.compute_position_two_imus(
+                          lf.Wb[snip:ext_stop], lf.Ab[snip:ext_stop],
+                          rf.Wb[snip:ext_stop], rf.Ab[snip:ext_stop], period))
+            e, end_foot = imu.snug_end(eL, eR, limit=stop - 1 - snip)
+            if e is not None and snip + 2 <= snip + e + 1 < stop:
+                end = snip + e
+        return {'snip': snip, 'onset': onset, 'start': start, 'end': end,
+                'start_from': start_from, 'end_foot': end_foot,
+                'stop_found': stop_after(feet, subject, end, period),
+                'end_extended_s': (stop - i1) * period, 'stop_searched_s': 0.0,
+                'walkback_cut': False, 'walkback_steps': 0, 'chain_back_s': 0.0,
+                '_infos': (L, R)}
+
+    def walkback(w):
+        """walkback_info on the GAIT window [snip, end] - the run the analysis
+        will use (footfall detection near a window's edge depends on where
+        the window ends, so the wider look-ahead run is not used here)."""
+        L, R = w['_infos']
+        a, b = w['snip'], w['end'] + 1
+        if b < a + len(L.Vm):
+            L, R = imu.compute_position_two_imus(lf.Wb[a:b], lf.Ab[a:b],
+                                                 rf.Wb[a:b], rf.Ab[a:b], period)
+        sides = {}
+        for side, info in (('left', L), ('right', R)):
+            td = imu.touchdown_map(info.stationary_periods, period)
+            ff = np.unique(td[np.where(info.FF_walking)[0]])
+            sides[side] = {'ff_idx': ff[ff <= w['end'] - w['snip']]}
+        probe = {'slice': (w['snip'], w['snip'] + len(L.Vm)),
+                 't_ref': w['start'] - w['snip'], 't0_abs': w['start'],
+                 'end_abs': w['end'], 'sides': sides,
+                 'left_info': L, 'right_info': R}
+        return walkback_info(probe, period, expected_m)
+
+    def done(w):
+        w.pop('_infos', None)
+        return w
+
+    # 2. Fix B: the walker may already be stepping before the search window
+    search_from, chain = i0, 0.0
+    if CHAIN_BACK and automatic:
+        w0 = decide(i1, i0)
+        cs = chain_back_start(feet, subject, i0, w0['start'], period)
+        if cs is not None and cs < w0['start']:
+            s2 = max(0, cs - int(round(0.1 / period)))
+            w2 = decide(i1, s2)
+            if w2['start'] < w0['start']:
+                search_from, chain = s2, (w0['start'] - w2['start']) * period
+
+    # 5-6. walk-back cut, stop check + extension
+    step = int(round(STOP_EXTEND_STEP_S / period))
+    n_steps = (int(round(STOP_EXTEND_MAX_S / STOP_EXTEND_STEP_S))
+               if may_extend else 0)
+    first = None
+    for k in range(n_steps + 1):
+        stop = min(n_rec, i1 + k * step)
+        w = decide(stop, search_from)
+        w['chain_back_s'] = chain
+        first = w if first is None else first
+        if WALKBACK_CUT:
+            hit, back, turn, _ = walkback(w)
+            if automatic and hit and turn is not None:
+                cut_at = min(turn + int(round(0.4 / period)), stop)
+                c = decide(cut_at, search_from)
+                c.update(end_extended_s=0.0, walkback_cut=True,
+                         walkback_steps=back, chain_back_s=chain)
+                return done(c)
+            if not automatic and hit:           # manual: flag only, never cut
+                w['walkback_steps'] = back
+        if w['stop_found']:
+            return done(w)
+        if stop >= n_rec:
+            break
+    # no stop even when extended: keep the ORIGINAL window, flagged
+    # (searching further would only reach the next movement)
+    first.update(end_extended_s=0.0,
+                 stop_searched_s=n_steps * STOP_EXTEND_STEP_S)
+    return done(first)
+
+
 def bout_sync_strides_steps(feet, subject, i0, i1, period,
                   initial_separation=0.2, anchor_mode='firstonly',
                   gravity_seconds=1.0, manual=False, resnug=True,
-                  snug_abs=None, end_overridden=False):
-    """THE per-bout pipeline: snug the gait inside the window [i0, i1], run
-    both feet + strides + steps, and pull out the series the figure needs
-    (|A| and |V| per foot, footfalls, steps, snug start). One entry point for
-    automatic and manual bouts, so their timing is found by the same rule.
+                  snug_abs=None, end_overridden=False, expected_m=None):
+    """THE per-bout pipeline, in two stages:
 
-    Snugging rule:
-    * resnug=True (default): [i0, i1] is only the SEARCH window - exactly
-      like the Start/Stop button presses. snug_start puts the gait start in
-      the valley before the first committed swing, snug_end the gait end in
-      the settling valley after the last one. Used for every automatic bout
-      and, by default, for manual windows too.
-    * resnug=False (legacy): a manual window IS the gait - the start is
-      pinned (snug_abs, else i0) and the end is not trimmed. An automatic
-      bout still snugs, except that an overridden end (end_overridden, the
-      drag editor) is kept as dragged.
+    1. find_straight_gait_window() decides where the gait starts and ends (all
+       the snugging, walk-back, chain-back and stop logic - see its docstring);
+    2. the bout is sliced to that window and compute_position_two_imus runs
+       ONCE on it;
+    3. steps_from_footfalls builds the steps from that run, with the gait
+       start handed over (it does not re-decide it).
+    No strides are computed: steps (and step speed) come from footfalls.
 
-    Stop check (stop_after): if the gait end is not followed by a true stop,
-    an AUTOMATIC bout whose end is still the Stop press is re-run with the
-    window extended STOP_EXTEND_STEP_S at a time (up to STOP_EXTEND_MAX_S)
-    until a stop is found - the press may have come before the walk ended.
-    If none is found the ORIGINAL window's result is kept, flagged. A manual
-    or dragged end is NEVER extended (the scientist's judgement stands); it
-    is only flagged. The result carries stop_found, end_extended_s (and
-    stop_searched_s when the search failed).
-
-    anchor_mode='firstonly' anchors the common frame at the first foot contacts
-    so the assumed `initial_separation` lateral offset sits at the gait start
-    (visible at the beginning of the overhead); 'auto' minimizes drift instead.
-
-    gravity_seconds: keep up to this many seconds of the verified BOTH-feet-quiet
-    stationary block just before walk onset inside the slice (default 1.0; 0 =
-    snip exactly at onset, the pre-2026-09 behaviour). The mechanization's own
-    footfall/stationarity criterion then pins that lead-in as the opening
-    stance: the first stride's ZUPT averages gravity over real standing
-    (halves first-step vertical drift), both feet register their opening
-    stance touchdown (so the step train's gait-init logic sees the classic
-    two-stance pattern), and snug_start's valley lands at the stance end —
-    t=0 becomes "where the pinned stance ends". Was shelved in June because
-    the standing footfall fought the OLD unconditional gait-init drop (fixed
-    2026-09-02). The separate An[0] init bug fix (in compute_position) is
-    always on.
-
-    snug_end_enabled: trim to the settling valley after the last committed
-    swing (snug_start in reverse), then rerun mechanization/strides on that
-    window so the final ZUPT and step metrics use the trimmed end. An explicit
-    inspector end override disables automatic end trimming.
+    Returns the per-bout dict the figures and tables use: the series for the
+    panels (sides, step_sides, steps, t), the raw per-foot objects, slice,
+    t_ref / t0_abs (gait start) / end_abs (gait end), and the window flags
+    (stop_found, end_extended_s, stop_searched_s, walkback_cut,
+    walkback_steps, chain_back_s). Arguments: see find_straight_gait_window; plus
+    anchor_mode ('firstonly' anchors the common frame at the first foot
+    contacts so the assumed `initial_separation` sits at the gait start;
+    'auto' minimizes drift) for the step lengths/widths.
     """
     import warnings
     rank_warning = (   # np.RankWarning in numpy 1.x, moved in 2.x
         getattr(getattr(np, 'exceptions', None), 'RankWarning', None)
         or getattr(np, 'RankWarning', RuntimeWarning))
-    if resnug:
-        force_snug_abs_, snug_end_enabled_ = None, True
-    else:
-        force_snug_abs_ = (snug_abs if snug_abs is not None
-                           else (i0 if manual else None))
-        snug_end_enabled_ = not (manual or end_overridden)
-    i0, i1 = int(i0), int(i1)
-
-    def attempt(i1):
-        """One run of the pipeline on [i0, i1] (the loop below may extend i1)."""
-        # Walk onset + opening-stance lead-in, from the subject's RAW stillness
-        # (|gyro| < STILL_RAD_S rad/s on either foot = moving). detect_quiet_time
-        # is NOT used here: it demands 1.5 s runs and prunes samples (it is a
-        # bias-window hunter), so it misses short genuine stances and can even
-        # place "onset" after the first swing already happened.
-        #
-        # onset: first moving sample at/after the click — but if a foot is
-        # already mid-swing AT the click (jumped the gun / late press), walk back
-        # to that motion run's start. lead: consecutive BOTH-feet-still samples
-        # immediately before onset, up to `grav`, allowed to cross the click
-        # (the true side-by-side stance often sits just before the Start press).
-        # The kept stretch is pinned as stance by the mechanization's own
-        # footfall criterion; snug_start's valley then lands at its end.
-        grav = int(round(gravity_seconds / period))
-        a0 = max(0, i0 - grav)                       # search floor (pre-click cap)
-        b0 = min(i1, i0 + int(round(5.0 / period)))  # onset must be near the click
-        moving = np.zeros(b0 - a0, bool)
-        for side in ('left', 'right'):
-            Wm = np.linalg.norm(feet[(subject, side)].Wb[a0:b0], axis=1) / period
-            moving |= Wm >= STILL_RAD_S
-        click = i0 - a0
-        if moving[click]:                            # mid-swing at the click
-            run = np.flatnonzero(~moving[:click][::-1])
-            onset = i0 - (int(run[0]) if len(run) else click)
-        else:
-            after = np.flatnonzero(moving[click:])
-            onset = i0 + (int(after[0]) if len(after) else b0 - i0)
-        still_before = ~moving[:onset - a0]
-        run = np.flatnonzero(~still_before[::-1])
-        lead = min(grav, int(run[0]) if len(run) else len(still_before))
-        snip = max(0, onset - lead)
-        result = process_bout(feet, subject, snip, i1, period, pad_seconds=0.0)
-        end_foot = None
-        if snug_end_enabled_:
-            # Find the end on a trajectory that runs ~1 s PAST the window: cut at
-            # the window edge, a swing still in progress there is truncated into
-            # a fake landing (a mid-walk end drag landed mid-swing). The gait
-            # ends at the last landing completed inside the window.
-            n_rec = min(len(feet[(subject, s)].Wb) for s in ('left', 'right'))
-            ext_stop = min(n_rec, i1 + int(round(END_LOOKAHEAD_S / period)))
-            ext = (result if ext_stop <= i1 else
-                   process_bout(feet, subject, snip, ext_stop, period,
-                                pad_seconds=0.0))
-            end_snap, end_foot = imu.snug_end(ext['left_info'], ext['right_info'],
-                                              limit=i1 - 1 - ext['slice'][0])
-            if end_snap is not None:
-                # snug_end is inclusive; processing slices are exclusive at i1.
-                trimmed_stop = ext['slice'][0] + end_snap + 1
-                if snip + 2 <= trimmed_stop < result['slice'][1]:
-                    result = process_bout(feet, subject, snip, trimmed_stop, period,
-                                          pad_seconds=0.0)
-        # force_snug_abs_: absolute sample to pin the snug gait start to (interactive
-        # override of snug_start's detection); converted to slice-relative here
-        force_snap = (None if force_snug_abs_ is None
-                      else int(force_snug_abs_) - result['slice'][0])
-        steps = imu.steps_from_strides(result['left_strides'], result['right_strides'],
-                                       result['left_info'], result['right_info'], period,
-                                       initial_separation=initial_separation,
-                                       anchor_mode=anchor_mode, force_snap=force_snap)
-        j0, j1 = result['slice']
-        steps['end_snap'] = j1 - j0 - 1
-        steps['end_snap_foot'] = end_foot
-        # time axis referenced to the SNUG-UP sample (best estimate of gait start):
-        # t=0 = snug start, the manually-clipped pre-walk sits at negative t. Fall back
-        # to the detected onset if no snug was found.
-        snap = steps.get('start_snap')
-        onset_in_slice = onset - j0
-        t_ref = snap if snap is not None else onset_in_slice   # slice-relative t=0
-        t0_abs = j0 + t_ref                                    # absolute sample at t=0
-        t = (np.arange(j1 - j0) - t_ref) * period
-
-        sides, step_sides = {}, {}
-        for side in ['left', 'right']:
-            info = result[f'{side}_info']
-            td = imu.touchdown_map(info.stationary_periods, period)
-            ff = np.unique(td[np.where(info.FF_walking)[0]])
-            sides[side] = {'Vm': info.Vm, 'Am': np.linalg.norm(info.A, axis=1),
-                           'ff_idx': ff,
-                           'ff_t': (ff - t_ref) * period, 'ff_v': info.Vm[ff]}
-            sel = steps['leading_foot'] == side
-            lead_idx = steps['end_idx'][sel].astype(int)
-            step_sides[side] = {'t': (lead_idx - t_ref) * period,
-                                'v': info.Vm[lead_idx]}
-
-        n_strides = (len(result['left_strides'].time) +
-                     len(result['right_strides'].time))
-        # plot series (sides/step_sides/steps/t…) for the panel, PLUS the raw
-        # per-foot objects + slice so a caller can build a table without re-running
-        # the pipeline. This dict is the single per-bout result for both the batch
-        # figures and the notebook table.
-        return {'subject': subject, 'period': period, 'onset': onset,
-                't_ref': t_ref, 't0_abs': t0_abs, 'end_abs': j1 - 1,
-                'stop_found': stop_after(feet, subject, j1 - 1, period),
-                'end_extended_s': 0.0,
-                'slice': (j0, j1), 't': t,
-                'sides': sides, 'step_sides': step_sides, 'steps': steps,
-                'n_strides': n_strides, 'initial_separation': initial_separation,
-                'left_info': result['left_info'], 'right_info': result['right_info'],
-                'left_strides': result['left_strides'],
-                'right_strides': result['right_strides']}
-
-    may_extend = snug_end_enabled_ and not manual and not end_overridden
-    n_rec = min(len(feet[(subject, s)].Wb) for s in ('left', 'right'))
-    step = int(round(STOP_EXTEND_STEP_S / period))
-    n_steps = (int(round(STOP_EXTEND_MAX_S / STOP_EXTEND_STEP_S))
-               if may_extend else 0)
-    with warnings.catch_warnings():  # stride polyfit warns on short bouts
+    # the engine prints a footfall-count warning per call; the look-ahead runs
+    # make that noise, so silence it here once for the whole bout
+    with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()):
         warnings.simplefilter('ignore', rank_warning)
-        first = None
-        for k in range(n_steps + 1):
-            stop = min(n_rec, i1 + k * step)
-            res = attempt(stop)
-            res['end_extended_s'] = (stop - i1) * period
-            first = res if first is None else first
-            if res['stop_found']:
-                return res
-            if stop >= n_rec:
-                break
-    # no stop even when extended: keep the ORIGINAL window's gait, flagged
-    # (searching further would only reach the next movement)
-    first['end_extended_s'] = 0.0
-    first['stop_searched_s'] = n_steps * STOP_EXTEND_STEP_S
-    return first
+        # 1. where the straight walk starts and ends
+        win = find_straight_gait_window(feet, subject, i0, i1, period,
+                                        manual=manual, resnug=resnug,
+                                        snug_abs=snug_abs,
+                                        end_overridden=end_overridden,
+                                        expected_m=expected_m,
+                                        gravity_seconds=gravity_seconds)
+        # 2. slice the bout to that window, run the engine once
+        j0, j1 = win['snip'], win['end'] + 1
+        lf, rf = feet[(subject, 'left')], feet[(subject, 'right')]
+        left_info, right_info = imu.compute_position_two_imus(
+            lf.Wb[j0:j1], lf.Ab[j0:j1], rf.Wb[j0:j1], rf.Ab[j0:j1], period)
+        t_ref = int(np.clip(win['start'] - j0, 0, j1 - j0 - 1))  # slice-relative t=0
+        # 3. steps from footfalls; the gait start is handed over ('onset' =
+        # no committed swing was found, i.e. no snug start exists)
+        steps = imu.steps_from_footfalls(
+            left_info, right_info, period,
+            initial_separation=initial_separation, anchor_mode=anchor_mode,
+            force_snap=None if win['start_from'] == 'onset' else t_ref)
+    steps['end_snap'] = j1 - j0 - 1
+    steps['end_snap_foot'] = win['end_foot']
+    t0_abs = j0 + t_ref
+    t = (np.arange(j1 - j0) - t_ref) * period
+
+    sides, step_sides = {}, {}
+    for side, info in (('left', left_info), ('right', right_info)):
+        td = imu.touchdown_map(info.stationary_periods, period)
+        ff = np.unique(td[np.where(info.FF_walking)[0]])
+        sides[side] = {'Vm': info.Vm, 'Am': np.linalg.norm(info.A, axis=1),
+                       'ff_idx': ff,
+                       'ff_t': (ff - t_ref) * period, 'ff_v': info.Vm[ff]}
+        sel = steps['leading_foot'] == side
+        lead_idx = steps['end_idx'][sel].astype(int)
+        step_sides[side] = {'t': (lead_idx - t_ref) * period,
+                            'v': info.Vm[lead_idx]}
+
+    out = {'subject': subject, 'period': period, 'onset': win['onset'],
+           't_ref': t_ref, 't0_abs': t0_abs, 'end_abs': j1 - 1,
+           'slice': (j0, j1), 't': t,
+           'sides': sides, 'step_sides': step_sides, 'steps': steps,
+           'n_steps': len(steps['time']), 'initial_separation': initial_separation,
+           'left_info': left_info, 'right_info': right_info, 'window': win}
+    for k in ('stop_found', 'end_extended_s', 'stop_searched_s',
+              'walkback_cut', 'walkback_steps', 'chain_back_s'):
+        out[k] = win[k]
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1145,6 +1320,8 @@ def add_gait_timing(feet, aligned, only=None, resnug=True, cache=None):
     (snugged gait, mean of both feet, gait start -> farthest footfall), and
     came_back (the window also contains a walk back after a turn). Compare
     walked_m with the target distance_m; align_max_m is the alignment's padded
+    (also walkback_cut: Fix A ended the gait at the turn; chain_back_s: Fix
+    B started it this many seconds earlier.)
     max excursion and runs larger.
 
     For every matched bout (or only the rows where boolean `only` is True),
@@ -1156,10 +1333,10 @@ def add_gait_timing(feet, aligned, only=None, resnug=True, cache=None):
     """
     out = _upgrade_columns(aligned)
     for col in ('gait_start_s', 'gait_end_s', 'gait_duration_s',
-                'end_extended_s', 'walked_m', 'walked_error_m'):
+                'end_extended_s', 'walked_m', 'walked_error_m', 'chain_back_s'):
         if col not in out:
             out[col] = np.nan
-    for col in ('stop_found', 'came_back'):
+    for col in ('stop_found', 'came_back', 'walkback_cut'):
         if col not in out:
             out[col] = pd.Series(pd.NA, index=out.index, dtype='boolean')
     pairs = feet_pairs_from_labels(feet)
@@ -1177,13 +1354,13 @@ def add_gait_timing(feet, aligned, only=None, resnug=True, cache=None):
         row = out.loc[idx]
         person = str(row['walker']).rsplit('_', 1)[-1]
         manual = bool(row.get('manual', False) == True)
-        key = ('gait2', person, float(row['start_s']), float(row['stop_s']),
-               manual, resnug)
+        key = ('gait3', person, float(row['start_s']), float(row['stop_s']),
+               manual, resnug, WALKBACK_CUT, CHAIN_BACK)
         if cache is not None and key in cache:
-            g0, g1, stop, ext, walked, came_back = cache[key]
+            g0, g1, stop, ext, walked, came_back, wbc, chain = cache[key]
         else:
-            g0 = g1 = ext = walked = np.nan
-            came_back = pd.NA
+            g0 = g1 = ext = walked = chain = np.nan
+            came_back = wbc = pd.NA
             stop = pd.NA
             subject = {'a': 's1', 'b': 's2'}.get(person)
             if subject and (subject, 'left') in pairs and (subject, 'right') in pairs:
@@ -1192,34 +1369,47 @@ def add_gait_timing(feet, aligned, only=None, resnug=True, cache=None):
                         r = bout_sync_strides_steps(pairs, subject,
                                          int(row['start_s'] / period),
                                          int(row['stop_s'] / period), period,
-                                         manual=manual, resnug=resnug)
+                                         manual=manual, resnug=resnug,
+                                         expected_m=float(row['distance_m']))
                     g0, g1 = r['t0_abs'] * period, r['end_abs'] * period
                     stop, ext = bool(r['stop_found']), float(r['end_extended_s'])
                     travel = imu.overhead_travel(r)
                     walked, came_back = travel['mean'], travel['came_back']
+                    wbc = bool(r.get('walkback_cut', False))
+                    chain = float(r.get('chain_back_s', 0.0))
                 except Exception:
                     pass
             if cache is not None:
-                cache[key] = (g0, g1, stop, ext, walked, came_back)
+                cache[key] = (g0, g1, stop, ext, walked, came_back, wbc, chain)
         out.loc[idx, ['gait_start_s', 'gait_end_s', 'gait_duration_s',
                       'end_extended_s', 'walked_m', 'walked_error_m']] = (
             g0, g1, g1 - g0, ext, walked, walked - float(row['distance_m']))
         out.loc[idx, 'came_back'] = came_back
         out.loc[idx, 'stop_found'] = stop
+        out.loc[idx, 'walkback_cut'] = wbc
+        out.loc[idx, 'chain_back_s'] = chain
     return out
 
 
 def _stop_note(res, manual=False):
-    """(text, is_warning) describing the stop check of a snugged bout."""
+    """(text, is_warning) describing the stop check / Fix A / Fix B of a bout."""
+    fix = ''
+    if res.get('chain_back_s'):
+        fix += f"; start moved {res['chain_back_s']:.1f} s earlier (already stepping)"
+    if res.get('walkback_cut'):
+        return fix + '; walk back removed (ended at the turn)', False
+    if res.get('walkback_steps'):
+        return (fix + f"; walks back after the turn ({res['walkback_steps']} steps)"
+                ' - move the end earlier', True)
     if res.get('stop_found') and not res.get('end_extended_s'):
-        return '', False
+        return fix, False
     if res.get('stop_found'):
-        return (f"; window extended +{res['end_extended_s']:.0f} s to find "
+        return (fix + f"; window extended +{res['end_extended_s']:.0f} s to find "
                 f"the stop", False)
     if manual:
-        return '; NO clear stop in window - your end used as is', True
+        return fix + '; NO clear stop in window - your end used as is', True
     searched = res.get('stop_searched_s') or 0
-    return (f'; NO clear stop' + (f' (searched +{searched:.0f} s past the '
+    return (fix + f'; NO clear stop' + (f' (searched +{searched:.0f} s past the '
                                   f'press; end kept at the press)' if searched
                                   else '') + ' - check the end', True)
 
@@ -1289,7 +1479,9 @@ def _render_inspect_block(axes5, feet, pairs, row, period,
                            resnug=resnug, snug_abs=snug_abs,
                            end_overridden=i1_abs is not None,
                            initial_separation=initial_separation,
-                           anchor_mode=anchor_mode)
+                           anchor_mode=anchor_mode,
+                           expected_m=(float(row['distance_m'])
+                                       if pd.notna(row.get('distance_m')) else None))
         expected = float(row['distance_m']) if pd.notna(row.get('distance_m')) else None
         imu.draw_bout_block(axes5, res, ymax=ymax, expected_m=expected)
         # the walked distance of THIS drawing (updates on every drag/redraw)

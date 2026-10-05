@@ -1,0 +1,71 @@
+trial,rep,bout,category,evidence
+1,1,1,NODATA,no presses; known missed trial-rep
+1,1,2,NODATA,no presses
+1,2,1,LAST,"""rep 1 ... missing last step"" [?which bout]"
+2,1,1,LAST,missed last step; walked 10.7/12
+2,1,2,LAST,"missed last step; walked 10.6/12, stop not found"
+3,1,1,WALKBACK,"""whole bout selected""; 4 backward steps, came_back"
+3,1,2,EARLY,"""starts before start""; came_back + 2 s extension"
+3,2,2,LAST,"""bout 2 corrected"": 4 steps, 2.1 s gait, 3 swings after the end [?direction]"
+4,1,2,WALKBACK,"""only trip there""; 19 steps / 10.5 s, stop not found"
+4,2,1,STOP?,"botched trial, video review"
+4,2,2,STOP?,"botched trial, video review"
+6,1,2,EARLY,"""started before command""; reaction -0.98 s (at the 1 s limit)"
+7,2,2,WALKBACK,"watch video; 22 steps / 14.9 s for 12 m, 3 backward steps, no stop"
+8,1,2,WALKBACK,"watch video for stop; 8 backward steps, 13.5 s for 8 m"
+9,1,2,WALKBACK,"watch video for stop; 6 backward steps, 11.4 s for 5 m"
+9,2,2,WALKBACK,"""captured whole trip""; 8 backward steps"
+10,1,1,LAST,"""didn't select whole bout""; 10.4/12, needed a 2 s extension"
+12,1,1,FIRST,possible missed first step; a swing ends 0.5 s before the detected start
+12,1,2,FIRST,possible missed first step; start at the -1 s search limit
+13,1,2,WALKBACK,"shortened to not include walk back; came_back, extended 2 s"
+13,2,1,STOP?,bout 1 watch video
+13,2,2,WALKBACK,walk back; 5 backward steps
+14,2,2,WALKBACK,"walk back; 6 backward steps, 10.2 s for 5 m"
+15,2,2,DIST,"""9 / 8 m""; walked 7.9 now"
+16,2,1,DIST,"""4.3 / 2.5""; walked 1.9 / 2.5 now [?bout]"
+18,1,2,STOP?,watch video to see end
+18,2,2,DIST,"""8.3 / 8""; walked 7.35 now"
+19,1,2,WALKBACK,"""corrected to right length""; 12.3 s for 12 m, no stop"
+20,1,2,STOP?,watch video; extended 2 s
+20,2,2,STOP?,watch video
+21,1,2,WALKBACK,"manual end; 22 steps / 15.5 s for 12 m, 4 backward steps, no stop"
+21,2,1,DIST,"""12.7 > 12""; walked 11.8 now [?bout]"
+22,1,2,WALKBACK,"manual end; came_back, extended 2 s"
+22,2,1,WALKBACK,manual end; 5.5 s for 2.5 m
+23,1,2,FIRST,didn't pick up first step; a swing ends just before the start [?bout]
+24,2,1,STOP?,watch video for end stop; extended 1 s
+24,2,2,WALKBACK,"watch video for end stop; came_back, extended 2 s"
+25,2,2,WALKBACK,"manual end; came_back, 3 backward steps"
+26,2,2,WALKBACK,"manual end; 11.8 s for 12 m, no stop"
+27,2,2,DIST,"""5.5 / 5""; walked 5.3 now"
+28,2,2,FIRST,needs to include first step [?bout]
+30,1,1,DIST,"""5.5 / 5""; walked 4.6 now"
+32,2,1,DIST,"""2.8 / 2.5""; walked 2.0 now"
+33,2,1,WALKBACK,shortened to not include trip back; no stop
+34,1,1,FIRST,late start; a swing ends before the start
+34,1,2,LAST,potential missed end step
+34,2,2,DIST,"""measured over expected""; walked 4.7 now [?bout]"
+35,2,2,LAST,potentially missed last step [?bout]
+36,1,1,UNDER,""">1 m missing on 8 m""; walked 6.9 [?bout]"
+36,2,2,WALKBACK,"includes part of walk back; 5 backward steps, extended 3 s"
+37,1,2,LAST,"last step missed; 4 steps, 1.7/2.5"
+37,2,1,NODATA,"""disaster, no step data"": matched snip has 0 steps, walked 0.06 m"
+37,2,2,NODATA,bout missed by the alignment
+38,1,2,LAST,potentially missed last step
+38,2,2,DIST,"""1 m over expected""; walked 2.6 now"
+39,1,2,EARLY,possible hesitation
+39,2,2,DIST,"""3.6 > 2.5""; walked 2.3 now"
+41,2,1,STOP?,verify Stop button accuracy
+42,1,2,WALKBACK,"only walk there; came_back, 10 steps / 9.3 s for 2.5 m"
+42,2,1,DIST,"""both over distance""; walked 2.1 now"
+42,2,2,DIST,"""both over distance""; walked 2.85 now"
+43,1,2,STOP?,"""shorten to not include last step?"""
+43,2,1,STOP?,watch video bout 1
+44,1,2,LAST,"""last step looks odd"""
+45,1,2,FIRST,"watch video; 4 swings before the start, start at the -1 s limit, walked 2.9/5"
+45,2,1,WALKBACK,"watch video for endpoint; came_back, 7 backward steps, 12.4 s for 5 m"
+46,1,2,FIRST,possible missed first step; a swing ends before the start
+46,2,1,LAST,"""extended to capture blue step""; 2 swings between gait end and Stop press"
+46,2,2,WALKBACK,shortened; came_back
+48,1,2,WALKBACK,"video review; came_back, 5 backward steps, 10 s for 5 m"

@@ -189,6 +189,19 @@ def draw_accel(ax, data, ymax=ACCEL_YMAX, legend=True):
         ax.legend(fontsize=8, loc='upper right', ncols=2)
 
 
+PRE_GAIT_COLOR = '#8c959f'      # = the omnibus 'expected' grey
+
+
+def shade_pre_gait(ax, label=False):
+    """Grey band over t < 0 (before the snug gait start): context only, not
+    analysed. Hollow grey circles in that band are standing contacts."""
+    ax.axvspan(-1e3, 0, color=PRE_GAIT_COLOR, alpha=0.10, lw=0, zorder=0)
+    if label:
+        ax.text(0.0, 0.97, 'before gait start: not analysed  ',
+                transform=ax.get_xaxis_transform(), ha='right', va='top',
+                fontsize=7, color=PRE_GAIT_COLOR)
+
+
 def draw_velocity(ax, data, ymax=FOOTSPEED_YMAX, legend=True):
     """Row 2: |V| per foot with footfall dots and step stars, plus the snug-start
     foot-speed thresholds (horizontal). t=0 is the snug-up gait start."""
@@ -196,12 +209,20 @@ def draw_velocity(ax, data, ymax=FOOTSPEED_YMAX, legend=True):
     ax.axvline(0, color='k', lw=0.8, ls=':', alpha=0.6)   # t=0 = snug gait start
     ax.axhline(steps['start_high'], color='gray', lw=0.7, ls='--', alpha=0.6)
     ax.axhline(steps['start_low'], color='gray', lw=0.7, ls=':', alpha=0.6)
+    shade_pre_gait(ax, label=True)
     for side in ['left', 'right']:
         s = data['sides'][side]
         ax.plot(data['t'], s['Vm'], lw=0.7, color=side_color[side], alpha=0.85,
                 label=f'{side} |V|')
-        ax.plot(s['ff_t'], s['ff_v'], '.', color=side_color[side], ms=9,
+        # contacts at/after the gait start (t=0) are the walk; earlier ones
+        # (the standing stance the window keeps as a ZUPT lead-in) are drawn
+        # hollow grey: they are not steps and enter no distance/time/speed.
+        ff_t, ff_v = np.asarray(s['ff_t'], float), np.asarray(s['ff_v'], float)
+        pre = ff_t < -1e-9
+        ax.plot(ff_t[~pre], ff_v[~pre], '.', color=side_color[side], ms=9,
                 alpha=0.9)
+        ax.plot(ff_t[pre], ff_v[pre], 'o', mfc='none', mec=PRE_GAIT_COLOR,
+                ms=6, mew=1.0, ls='None')
     for side in ['left', 'right']:
         ss = data['step_sides'][side]
         ax.plot(ss['t'], ss['v'], 'o', color=side_color[side], ms=8, mec='k',
@@ -215,11 +236,14 @@ def draw_velocity(ax, data, ymax=FOOTSPEED_YMAX, legend=True):
 
 
 def draw_step_speed(ax, data, ymax=STEPSPEED_YMAX):
-    """Row 3: step speed between consecutive footfalls (one curve), zero-anchored
-    at t=0 (the snug-up gait start, walker at rest). First point is the snugged
-    first step."""
+    """Row 3: STEP speed (one point per step, at its landing), zero-anchored at
+    t=0 (the gait start, walker at rest). A step runs from one foot's
+    touchdown to the other foot's; its speed is how far the midpoint between
+    the two feet moved in that time (steps_from_strides). Never stride
+    speed."""
     steps = data['steps']
     t_step = (steps['end_idx'] - data['t_ref']) * data['period']
+    shade_pre_gait(ax)
     ax.plot(np.r_[0.0, t_step], np.r_[0.0, steps['frwd_speed']], 'o-',
             color='tab:purple', lw=1.2, ms=6, mec='k', mew=0.4)
     ax.axvline(0, color='k', lw=0.8, ls=':', alpha=0.6)
@@ -341,7 +365,7 @@ def draw_overhead(ax, data, lat_lim=1.0, equal=False, legend=True,
                     mew=0.5, ls='None', label='snug start')
     ax.axvline(0, color='gray', lw=0.5, ls=':', alpha=0.5)
     if expected_m is not None and np.isfinite(expected_m):
-        ax.axhline(expected_m, color='0.25', lw=1.0, ls='--', zorder=0,
+        ax.axhline(expected_m, color=PRE_GAIT_COLOR, lw=1.4, ls='--', zorder=0,
                    label=f'target {expected_m:g} m')
     ax.set_xlim(-lat_lim, lat_lim)          # fixed for cross-trial comparison
     if fy_all:

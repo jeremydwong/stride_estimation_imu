@@ -1117,3 +1117,105 @@ code changes (user-directed: "do all three").
   new sessions are a copy of the s07_s08 notebook with the EDIT HERE config
   lines changed). README says so. Nothing imported it; CLAUDE.md history
   mentions remain as history.
+
+### 2026-10-03 — Hallee's full review: Fix A (walk back) + Fix B (first step), A/B review tool
+
+- **Hallee's review** (hallee_1..3.jpg, all 96 trial-reps) transcribed:
+  `reports/s07_s08_hallee_notes.csv` (+ `no_change` flag) and per-bout
+  categories `reports/s07_s08_hallee_labels.csv` (70 flagged bouts: WALKBACK
+  22, DIST 12, LAST 11, STOP? 10, FIRST 7, NODATA 4, EARLY 3, UNDER 1).
+  Report: `reports/s07_s08_scoring_failures.html` (also published).
+- **Fix A — walk-back cut** (`WALKBACK_CUT`, `walkback_info`): automatic bout
+  with >= 2 footfalls stepping back along each foot's own direction (per-foot
+  projection, ref = first footfall -> first > 0.5 m away), or gait > 1.4x
+  (target/1.25 m/s + 1 s; needs `expected_m`, now passed by add_gait_timing
+  and the figures), ends at the turn (later of the feet's farthest footfalls
+  + 0.4 s) and is NEVER stop-extended (the 09-29 extension had extended 6
+  walk-backs past the return). Manual: flag only (`walkback_steps`).
+  Isolated vs old code: 22/22 flagged walk-backs cut, 3/72 clean touched
+  (23.2 b1, 31.2 b1, 44.2 b1: turn-in-place steps after the farthest footfall;
+  gait -1.0..-1.6 s, walked unchanged), 6 other (16.2 b1 5.7->2.8 s, 32.2 b2
+  5.7->2.5 s, ...).
+- **Fix B — chain-back start** (`CHAIN_BACK`, `chain_back_start`): NOT a
+  threshold change — a blanket 3 s onset search pulled 12/72 clean bouts onto
+  pre-walk activity. Automatic only: if committed swings (>= 1.25 m/s) run
+  back-to-back (gaps <= 0.6 s) into the detected gait start, restart the
+  search at the first (<= 3 s back). 5/7 first-step bouts moved (4 gain a
+  step; 45.1 b2 +2 steps +1.6 m), 2/72 clean touched (26.1 b2, 44.2 b2: +1
+  step each), still missed 12.1 b2, 28.2 b2 (slow first step).
+- Result flags `walkback_cut`, `walkback_steps`, `chain_back_s`; table
+  columns `walkback_cut`, `chain_back_s`; figure note says what happened.
+  `attempt(i1, i0=i0)` now takes the start too. tests/test_bout_fixes.py.
+- **Visuals**: contacts before the snug gait start drawn hollow grey, t<0
+  shaded with "before gait start: not analysed" (`shade_pre_gait`,
+  `PRE_GAIT_COLOR`); overhead target line in the omnibus 'expected' grey.
+- **`scripts/ab_review.py`** (new): reusable A/B review — runs every matched
+  bout with module switches BEFORE vs AFTER, groups changed bouts by the
+  labels CSV (fixed / still_missed / touched_clean / touched_other), writes
+  one PDF per group with BEFORE/AFTER pages interleaved per trial-rep + an
+  index page, and changes.csv, to `<imu data>/figures/review/<date>_<name>/`.
+- Figures: previous SVGs copied to `figures/s07_s08_old/`; `figures/s07_s08/`
+  regenerated with both fixes. Removed stray test folders (flowtest, ovr, t)
+  that my earlier ManualScoring tests had written into Dropbox figures/.
+- OPEN (explained to user, not changed): step SPEED. Step k's speed is the
+  leading foot's STRIDE speed (stride length/time over its last two steps),
+  except step 1 (lead-foot displacement g->landing / time) and any step whose
+  stride started before g (displacement since g / time since g — includes the
+  time that foot stood still). So the first two steps are distorted (14.1 b1:
+  1.08, 0.98 vs the obvious ramp) and all steps lag/average over two. Proposed:
+  midpoint progression = lead-foot displacement within [prev touchdown, this
+  touchdown] / 2 / step time (14.1 b1: 0.54, 1.11, 1.35, 1.28, 1.30).
+
+### 2026-10-03 (later) — one place for start/end decisions; step speed, not stride speed
+
+- User: the step-speed panel was showing STRIDE speed ("lying to the
+  viewer") with hacks at the front; consolidate all start/end wiggling into
+  one place before compute_position_two_imus / steps_from_strides.
+- **`find_gait_window()`** (renamed `find_straight_gait_window()` the same day:
+  the window is one straight walk, reversals rejected) (brock_functions) now makes EVERY start/end
+  decision, in order: onset + standing lead-in (`_onset_and_snip`, raw gyro),
+  Fix B chain-back, snug start, snug end (1 s look-ahead), Fix A walk-back
+  cut, stop check + extension. It looks at look-ahead runs of the ENGINE only
+  (`_mechanize` = compute_position_two_imus, no strides/steps). Returns
+  absolute snip/onset/start/end + start_from ('snug'|'pinned'|'onset') +
+  flags. **`bout_sync_strides_steps()`** = find_gait_window, then ONE
+  process_bout on [snip, end] and steps_from_strides with the start handed
+  over (force_snap; None when start_from == 'onset', i.e. no snug exists).
+  Result also carries 'window'. Same signature/return keys as before.
+  VERIFIED a pure refactor before the speed change: 189/189 bouts identical
+  (start, end, slice, every step index/speed/length, walked, flags) vs a
+  snapshot. Two details needed for that: the walk-back check runs on the
+  gait window [snip, end] (footfall detection near a window edge depends on
+  where it ends), and 'onset' starts are passed as "no snug".
+- **Step speed** (steps_from_strides `frwd_speed`): a step = one foot's
+  touchdown -> the other foot's; speed = (|dP_left| + |dP_right|) / 2 / step
+  time = how far the MIDPOINT BETWEEN THE FEET moved (each foot's own
+  displacement between the two touchdowns; no strides, no cross-foot frame).
+  No step starts before the gait start g; steps ending at/before g dropped
+  (7 bouts lose a pre-walk "step"). The stride-speed lookup and both
+  first-step special cases are gone (strides args now unused, kept for
+  callers). s07_s08: median speeds step1/2/3/steady OLD 0.88/0.92/1.28/1.34,
+  NEW 0.58/1.11/1.30/1.33; step1 > step2 in 93/188 bouts OLD vs 6/188 NEW.
+  The "planted" foot moves 0.1-0.26 m within a step (heel-off before the
+  other foot's touchdown registers at its flat-foot plateau) - counted, so
+  this is the true midpoint; each foot's motion is partitioned, never
+  double-counted. Tests: StepSpeedTests.
+- **ab_review.py** compares CODE VERSIONS too: --before-src/--after-src or
+  --before-rev/--after-rev (git worktree), plus switches; each side runs in
+  its own subprocess (two copies of brock_functions never mix); --compare
+  window|speed; --trials always rendered ('requested'). Figures don't pickle
+  (lambda axes), so workers write one PDF per trial-rep and the main process
+  merges in BEFORE/AFTER order (pypdf via `uv run --with pypdf`, else
+  pdfunite) - pyproject untouched.
+- **One path, no side routes (user: "everything through the same path")**:
+  deleted `_mechanize` - find_straight_gait_window calls
+  compute_position_two_imus directly. bout_sync_strides_steps no longer uses
+  process_bout: it slices the bout to the decided window and calls
+  compute_position_two_imus ONCE, then **`steps_from_footfalls(left_info,
+  right_info, period, ...)`** (new name - it never used strides after the
+  step-speed change; `steps_from_strides` kept as a 1-line deprecated wrapper
+  for the dataset-1 examples). No strides computed in the bout path; result
+  drops left_strides/right_strides/n_strides, adds n_steps (demo_brock_velocity
+  print + brock_analysis.ipynb table updated). process_bout kept, marked
+  LEGACY, for the 4 dataset-1 example scripts only. Engine print-noise
+  silenced once per bout. Verified bit-identical (189/189) vs before.

@@ -1565,8 +1565,14 @@ def _common_frame(left_info: 'FootTrajectory', right_info: 'FootTrajectory', per
     return left_xyz, right_xyz, anchor, float(best)
 
 
-def steps_from_strides(left_strides: 'Strides', right_strides: 'Strides',
-                       left_info: 'FootTrajectory', right_info: 'FootTrajectory', period: float,
+def steps_from_strides(left_strides, right_strides, left_info, right_info,
+                       period, **kwargs):
+    """Deprecated name, kept for the dataset-1 example scripts: strides are
+    not used. Calls steps_from_footfalls(left_info, right_info, period)."""
+    return steps_from_footfalls(left_info, right_info, period, **kwargs)
+
+
+def steps_from_footfalls(left_info: 'FootTrajectory', right_info: 'FootTrajectory', period: float,
                        initial_separation: float = 0.3,
                        min_stride_displacement: float = 0.2,
                        anchor_mode: str = 'auto',
@@ -1588,12 +1594,17 @@ def steps_from_strides(left_strides: 'Strides', right_strides: 'Strides',
     dropped stride still corresponds to a genuine contact that should cross into
     a step; deriving steps from contacts keeps it.
 
-    Per step:
-      * frwd_speed — the leading foot's just-completed stride speed when a stride
-        ended at that touchdown; when the inbound stride was dropped (gait
-        initiation) the speed is recovered from the mechanized trajectory P (net
-        horizontal displacement of the leading foot from its previous contact,
-        over the elapsed time). Every step has a finite speed; there are no nans.
+    Per step (2026-10-03: STEP speed, never stride speed):
+      * frwd_speed — how far the MIDPOINT BETWEEN THE FEET moved during the
+        step, over the step time: (|dP_left| + |dP_right|) / 2 / step time,
+        each foot's horizontal displacement taken from its own trajectory
+        between the step's two touchdowns. In a step one foot swings and the
+        other is planted, so this is half the swinging foot's travel - in
+        steady walking exactly step length / step time, and from rest it
+        ramps up as the body does. Uses no strides and no cross-foot frame.
+        (It used to be the leading foot's STRIDE speed - averaged over two
+        steps - with special cases for the first two steps that read step 1
+        about twice too fast and step 2 too slow.)
       * length, width — from the common frame (walking axis +Y, lateral X with
         +X = the walker's right, gravity Z; see _common_frame): length is the
         forward gap between the two successive placements, width the lateral gap
@@ -1605,20 +1616,19 @@ def steps_from_strides(left_strides: 'Strides', right_strides: 'Strides',
     first is dropped so the contact train stays alternating. When the snip
     begins at walk onset the swinging foot has no stance plateau in-slice —
     the train already alternates and nothing is dropped. The FIRST step is
-    then "snugged" (snug_start): its start/time/speed AND length/width are moved
-    to the velocity valley before the first committed swing, removing the bogus
-    long, fast first step that pre-walk drift produces. Since drift before the
-    snug is ignored, that step's length is the leading foot's forward travel from
-    the snug start (its position there subtracted) and its width is the assumed
-    initial side-by-side separation. start_snap/start_snap_foot report the sample.
+    then starts at the gait start g (snug_start's valley before the first
+    committed swing, or force_snap - bout_sync_strides_steps hands it over):
+    no step's clock or distance starts before g, and contacts before g
+    (standing) are not steps. Since drift before g is ignored, the first
+    step's length is the leading foot's forward travel from g and its width
+    the assumed initial side-by-side separation. start_snap/start_snap_foot
+    report the sample.
 
     Two same-foot touchdowns in a row mean the other foot missed a contact — a
     rare fault, counted in n_same_foot_skips rather than faked.
 
     Parameters
     ----------
-    left_strides, right_strides : Strides
-        Per-foot stride_segmentation() outputs (uses start_end, frwd_speed).
     left_info, right_info : FootTrajectory
         compute_position_two_imus() outputs (need FF_walking, stationary_periods,
         P, Vm, euler).
@@ -1637,29 +1647,16 @@ def steps_from_strides(left_strides: 'Strides', right_strides: 'Strides',
         start_low. (n_too_slow is always 0 here — kept for compatibility; this
         segmenter does not gate steps on a max duration.)
     """
-    def foot_events(strides, info):
-        """(touchdowns, speed_at, prev_td) for one foot. touchdowns: sorted-unique
-        snapped FF_walking indices. speed_at: {snapped stride-end index -> forward
-        speed} for completed strides (first wins). prev_td: {touchdown -> previous
-        touchdown}, used to recover a step speed from P when a stride was dropped."""
+    def touchdowns_of(info):
+        """sorted-unique walking touchdowns of one foot, each snapped to the
+        start of its stationary plateau (touchdown_map)."""
         td = touchdown_map(info.stationary_periods, period)
         ff = np.where(info.FF_walking)[0]
-        touchdowns = np.unique(td[ff]).astype(int) if ff.size else np.array([], int)
-        speed_at = {}
-        se = strides.start_end
-        if se.size:
-            spd = np.asarray(strides.frwd_speed, float)
-            for e, s in zip(se[1], spd):
-                speed_at.setdefault(int(td[int(e)]), float(s))
-        prev_td = {int(c): int(p) for p, c in zip(touchdowns[:-1], touchdowns[1:])}
-        return touchdowns, speed_at, prev_td
+        return np.unique(td[ff]).astype(int) if ff.size else np.array([], int)
 
-    L_td, L_spd, L_prev = foot_events(left_strides, left_info)
-    R_td, R_spd, R_prev = foot_events(right_strides, right_info)
+    L_td, R_td = touchdowns_of(left_info), touchdowns_of(right_info)
     if len(L_td) == 0 or len(R_td) == 0:
         return _empty_steps()
-    spd_map = {'left': L_spd, 'right': R_spd}
-    prev_map = {'left': L_prev, 'right': R_prev}
     P_map = {'left': left_info.P, 'right': right_info.P}
 
     # both feet in one frame for the spatial measures (walking +Y, lateral X, Z up)
@@ -1709,26 +1706,18 @@ def steps_from_strides(left_strides: 'Strides', right_strides: 'Strides',
             if f0 == f1:
                 n_same_foot_skips += 1
             continue
-        spd = spd_map[f1].get(i1, np.nan)
-        prev = prev_map[f1].get(i1, i0)
-        if not np.isfinite(spd) or (g is not None and prev < g):
-            # Recover speed from the mechanized trajectory when the inbound
-            # stride was dropped by the >2 s cap (gait initiation), OR when it
-            # is clocked from a PRE-WALK stance (prev contact before the snug
-            # start g): a stride-time that includes standing makes the early
-            # steps read absurdly slow (e.g. step 2 at 0.37 m/s while step 1,
-            # snug-clocked, reads 1.0 — the "first step faster than second"
-            # artifact). No step's clock starts before g.
-            lo = prev if g is None else max(prev, g)
-            P = P_map[f1]
-            dist = float(np.linalg.norm(P[i1, :2] - P[lo, :2]))
-            spd = dist / max((i1 - lo) * period, period)
+        if g is not None and i1 <= g:   # ends before the gait start: standing
+            continue
+        lo = i0 if g is None else max(i0, g)    # no step starts before g
+        dt = max((i1 - lo) * period, period)
+        moved = sum(float(np.linalg.norm(P_map[s][i1, :2] - P_map[s][lo, :2]))
+                    for s in ('left', 'right'))
         iL, iR = (i1, i0) if f1 == 'left' else (i0, i1)
         out['leading_foot'].append(f1)
-        out['start_idx'].append(i0)
+        out['start_idx'].append(lo)
         out['end_idx'].append(i1)
-        out['time'].append((i1 - i0) * period)
-        out['frwd_speed'].append(spd)
+        out['time'].append(dt)
+        out['frwd_speed'].append(moved / 2.0 / dt)
         out['length'].append(fwd[f1][i1] - fwd[f0][i0])
         # +X is the walker's right, so right-minus-left keeps normal stance
         # positive and crossover negative (value identical to the old left-minus-
@@ -1753,16 +1742,12 @@ def steps_from_strides(left_strides: 'Strides', right_strides: 'Strides',
     # and width is taken as the assumed initial side-by-side separation.
     result['start_snap'] = g            # computed above, before the contact train
     result['start_snap_foot'] = gfoot
-    if g is not None and len(result['time']):
+    if g is not None and len(result['time']) and result['start_idx'][0] == g:
+        # the first step starts at g (time/speed already from g): its length is
+        # the leading foot's forward travel since g, its width the assumed
+        # side-by-side separation (pre-g drift ignored)
         lead = result['leading_foot'][0]
         end0 = int(result['end_idx'][0])
-        if g < end0:
-            P = P_map[lead]
-            new_t = max((end0 - g) * period, period)
-            result['start_idx'][0] = g
-            result['time'][0] = new_t
-            result['frwd_speed'][0] = float(
-                np.linalg.norm(P[end0, :2] - P[g, :2])) / new_t
-            result['length'][0] = float(fwd[lead][end0] - fwd[lead][g])
-            result['width'][0] = float(initial_separation)
+        result['length'][0] = float(fwd[lead][end0] - fwd[lead][g])
+        result['width'][0] = float(initial_separation)
     return result

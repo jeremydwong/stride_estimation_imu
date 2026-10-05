@@ -55,7 +55,7 @@ if __name__ == '__main__':
                     if snap is not None else 'n/a')
         print(f"Trial {TRIAL} bout {bout + 1}: {subject} walks — onset "
               f"sample {data['onset']} ({data['onset'] * period:.2f}s), "
-              f"{data['n_strides']} strides (both feet) -> "
+              f"{data['n_steps']} steps -> "
               f"{len(data['steps']['time'])} steps, snug start {snap_txt}")
 
     fig.suptitle(f'Trial {TRIAL} — active walker: overhead foot map + raw accel, '

@@ -1,0 +1,97 @@
+trial,rep,note,no_change
+1,1,"skipped, prints 'no matched bouts in aligned table'",False
+1,2,"rep 2 fixed [includes extra step]. Rep 1 fixed, missing last step",False
+2,1,Rep 1 missed last step. Rep 2 missed last step. (starred),False
+2,2,no changes,True
+3,1,"whole bout selected bout 1. 3.2 looks odd, starts before start",False
+3,2,check bout 1. bout 2 corrected,False
+4,1,bout 2 corrected to include only trip there,False
+4,2,no changes. (orange) Video review. Botched trial.,False
+5,1,no changes,True
+5,2,no changes,True
+6,1,no changes but 6.1.2 needs to be looked at. (orange) started before command,False
+6,2,no changes,True
+7,1,no changes. (orange margin) Person A ran over [?],False
+7,2,bout 2 watch video,False
+8,1,bout 2 watch video for stop,False
+8,2,no changes,True
+9,1,bout 2 watch video for stop,False
+9,2,"second bout captured whole trip, shortened, corrected",False
+10,1,(orange) didn't select whole bout,False
+10,2,no changes,True
+11,1,no changes,True
+11,2,no changes,True
+12,1,no changes. (orange) possible missed first step,False
+12,2,no changes,True
+13,1,bout 2 shortened to not include walk back,False
+13,2,"bout 2 corrected, reason as above (walk back). Bout 1 watch video",False
+14,1,no changes,True
+14,2,2nd bout corrected to not include walk back,False
+15,1,no changes,True
+15,2,no changes. bout 2 possible artifact 9 m / 8,False
+16,1,no changes,True
+16,2,Review: measured 4.3 m / 2.5,False
+17,1,no changes,True
+17,2,no changes,True
+18,1,watch video to see end bout 2. (orange) B ?? at start [illegible],False
+18,2,"bout 2 8.3 / 8 m, look at this",False
+19,1,bout 2 corrected to right length,False
+19,2,no changes,True
+20,1,no changes. Watch video for bout 2,False
+20,2,watch video for bout 2,False
+21,1,manual end for bout 2,False
+21,2,no changes. 12.7 > 12.0,False
+22,1,manual end for bout 2,False
+22,2,manual end for bout 1,False
+23,1,"no changes, possibly didn't pick up first step",False
+23,2,no changes,True
+24,1,no changes,True
+24,2,watch video for end stop bout 1/2,False
+25,1,no changes,True
+25,2,bout two manual end,False
+26,1,no change,True
+26,2,manual end for bout 2,False
+27,1,no change,True
+27,2,bout 2 5.5 / 5 m,False
+28,1,no changes,True
+28,2,"no changes, needs to include first step",False
+29,1,no changes,True
+29,2,no changes,True
+30,1,bout 1 5.5 / 5 m,False
+30,2,no changes,True
+31,1,no changes,True
+31,2,no changes,True
+32,1,no changes,True
+32,2,bout 1 2.8 / 2.5 m,False
+33,1,no changes,True
+33,2,bout one shortened to not include trip back,False
+34,1,"late start potentially on bout 1, potential missed end step bout 2",False
+34,2,measured over expected,False
+35,1,no changes,True
+35,2,"potentially missed last step, watch video",False
+36,1,no changes. >1 m missing on 8 m,False
+36,2,"bout 2 includes part of walk back, corrected",False
+37,1,last step missed bout 2,False
+37,2,Disaster. No step data. (starred),False
+38,1,potentially missed last step bout 2,False
+38,2,about 1 m over expected bout 2,False
+39,1,bout 2 looks like there could've been hesitation,False
+39,2,bout 2 3.6 > 2.5 m,False
+40,1,no changes,True
+40,2,no changes,True
+41,1,no changes,True
+41,2,no change but verify with video stop button accuracy bout 1,False
+42,1,bout 2 changed to only include walk there. Bout 1 good,False
+42,2,both over distance,False
+43,1,second bout to shorten to not include last step?,False
+43,2,watch video bout 1,False
+44,1,last step looks odd bout 2,False
+44,2,no changes,True
+45,1,watch video bout 2,False
+45,2,watch video to see endpoint,False
+46,1,possible missed first step,False
+46,2,bout 1 extended to capture blue step. Bout 2 shortened,False
+47,1,no change,True
+47,2,no change,True
+48,1,(orange) Video review,False
+48,2,no change,True
