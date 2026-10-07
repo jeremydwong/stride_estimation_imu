@@ -1,0 +1,221 @@
+<title>s07_s08 Manual Worklist</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+:root{color-scheme:light;
+ --paper:#f5f7f6;--card:#ffffff;--ink:#1d2726;--soft:#4d5b59;--rule:#d9e1df;--accent:#2f7a5f;
+ --f0:#8a9a97;--fa:#2f7a5f;--fb:#3b6fa8;--fc:#7a5ca8;--fd:#a8743b;--nr:#c0504d;--nv:#c9b458;--nm:#b7c2bf;--ne:#e1e7e5;--chipink:#ffffff;--chipdark:#1d2726}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;
+ --paper:#141a19;--card:#1b2321;--ink:#e3ebe8;--soft:#9fb0ac;--rule:#2c3836;--accent:#5fbf95;
+ --f0:#6c7b78;--fa:#3f9a77;--fb:#5b8fd0;--fc:#9b7fd0;--fd:#c99357;--nr:#d9706c;--nv:#b8a24a;--nm:#56625f;--ne:#34403e;--chipink:#0f1514;--chipdark:#e3ebe8}}
+:root[data-theme="dark"]{color-scheme:dark;
+ --paper:#141a19;--card:#1b2321;--ink:#e3ebe8;--soft:#9fb0ac;--rule:#2c3836;--accent:#5fbf95;
+ --f0:#6c7b78;--fa:#3f9a77;--fb:#5b8fd0;--fc:#9b7fd0;--fd:#c99357;--nr:#d9706c;--nv:#b8a24a;--nm:#56625f;--ne:#34403e;--chipink:#0f1514;--chipdark:#e3ebe8}
+*{box-sizing:border-box}
+html{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.6 "Source Sans 3",system-ui,sans-serif;padding:40px 20px 80px}
+main{max-width:880px;margin:0 auto;display:grid;gap:44px}
+h1,h2,h3{font-family:"Barlow Semi Condensed","Arial Narrow",sans-serif;line-height:1.15;text-wrap:balance;margin:0}
+h1{font-size:2.3rem;font-weight:700;letter-spacing:.005em}
+h2{font-size:1.45rem;font-weight:600;padding-bottom:8px;border-bottom:1px solid var(--rule)}
+h3{font-size:1.15rem;font-weight:600}
+p{margin:0;max-width:68ch} section{display:grid;gap:16px}
+.eyebrow{font:500 .78rem "JetBrains Mono",monospace;letter-spacing:.08em;text-transform:uppercase;color:var(--accent)}
+.mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.86em;font-variant-numeric:tabular-nums}
+code{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.84em;background:var(--rule);padding:1px 5px;border-radius:3px}
+.lead{font-size:1.12rem;color:var(--ink)} .soft{color:var(--soft)}
+.answer{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.answer div{background:var(--card);border:1px solid var(--rule);border-radius:6px;padding:14px 16px;display:grid;gap:2px}
+.answer .pct{font:600 1.05rem "JetBrains Mono",monospace;color:var(--accent)}
+.answer .n{font-family:"Barlow Semi Condensed",sans-serif;font-size:1.9rem;font-weight:700;line-height:1}
+.chart{background:var(--card);border:1px solid var(--rule);border-radius:6px;padding:16px;overflow-x:auto}
+.chart svg{width:100%;min-width:520px;height:auto;display:block}
+.grid{stroke:var(--rule);stroke-width:1} .goal{stroke:var(--soft);stroke-dasharray:4 4;stroke-width:1}
+.goal-t{fill:var(--soft);font:500 11px "JetBrains Mono",monospace} .ax{fill:var(--soft);font:12px "Source Sans 3",sans-serif}
+.line{fill:none;stroke:var(--accent);stroke-width:2.5} .dot{fill:var(--card);stroke:var(--accent);stroke-width:2.5}
+.val{fill:var(--ink);font:600 12px "JetBrains Mono",monospace}
+.bar{display:flex;height:34px;border-radius:5px;overflow:hidden;border:1px solid var(--rule)}
+.seg{display:flex;align-items:center;justify-content:center;color:var(--chipink);font:600 .8rem "JetBrains Mono",monospace;min-width:0}
+.seg.nm,.seg.ne,.seg.nv{color:var(--chipdark)}
+.legend{list-style:none;padding:0;margin:0;display:flex;flex-wrap:wrap;gap:6px 18px;font-size:.92rem;color:var(--soft)}
+.legend li{display:flex;align-items:center;gap:6px} .sw{width:12px;height:12px;border-radius:2px;display:inline-block}
+.f0{background:var(--f0)} .fa{background:var(--fa)} .fb{background:var(--fb)} .fc{background:var(--fc)} .fd{background:var(--fd)}
+.nr{background:var(--nr)} .nv{background:var(--nv)} .nm{background:var(--nm)} .ne{background:var(--ne)} .nd{background:var(--ne)}
+.fix{background:var(--card);border:1px solid var(--rule);border-left:5px solid var(--c);border-radius:6px;padding:18px 20px;display:grid;gap:10px}
+.fix .head{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 14px}
+.fix .stats{display:flex;flex-wrap:wrap;gap:6px 22px;font-size:.92rem;color:var(--soft)} .fix .stats b{color:var(--ink);font-family:"JetBrains Mono",monospace;font-weight:500}
+.fix ul{margin:0;padding-left:1.2em;display:grid;gap:4px;max-width:70ch}
+.conf{font:500 .74rem "JetBrains Mono",monospace;letter-spacing:.06em;text-transform:uppercase;padding:2px 8px;border-radius:99px;border:1px solid var(--rule);color:var(--soft)}
+.chip{font:600 .74rem "JetBrains Mono",monospace;padding:2px 8px;border-radius:99px;color:var(--chipink);white-space:nowrap}
+.chip.nv,.chip.nm,.chip.ne,.chip.nd{color:var(--chipdark)}
+.tbl{overflow-x:auto;border:1px solid var(--rule);border-radius:6px;background:var(--card)}
+table{border-collapse:collapse;width:100%;font-size:.92rem}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--rule);vertical-align:top}
+th{font:600 .78rem "JetBrains Mono",monospace;letter-spacing:.05em;text-transform:uppercase;color:var(--soft);background:var(--paper);position:sticky;top:0}
+details{background:var(--card);border:1px solid var(--rule);border-radius:6px;padding:12px 16px}
+summary{cursor:pointer;font-family:"Barlow Semi Condensed",sans-serif;font-weight:600;font-size:1.1rem}
+summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+details[open] summary{margin-bottom:12px}
+.trans{columns:2 300px;column-gap:28px;list-style:none;padding:0;margin:0;font-size:.92rem}
+.trans li{break-inside:avoid;padding:2px 0} .trans li.quiet{color:var(--soft)}
+.notcode{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+.notcode div{background:var(--card);border:1px solid var(--rule);border-radius:6px;padding:14px 16px;display:grid;gap:6px}
+@media (max-width:640px){.answer,.notcode{grid-template-columns:1fr} h1{font-size:1.85rem}}
+
+.grp{background:var(--card);border:1px solid var(--rule);border-left:5px solid var(--c);border-radius:6px;padding:18px 20px;display:grid;gap:12px}
+.grp .head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 14px}
+.grp h2{border:0;padding:0}
+.fixlbl{font-weight:500;color:var(--soft)}
+.grp .tbl{border-color:var(--rule)}
+.tool{font-size:.95rem}
+.nowrap{white-space:nowrap}
+tr.done td{color:var(--soft);text-decoration:none;background:var(--paper)}
+tr.done td:first-child::after{content:" ✓";color:var(--accent)}
+.steps{display:grid;gap:8px;margin:0;padding-left:1.3em;max-width:70ch}
+</style>
+<main>
+<header style="display:grid;gap:10px">
+<span class="eyebrow">s07_s08 · Hallee's review, rechecked on main afbf137 · 2026-10-05</span>
+<h1>s07_s08: which of Hallee's bouts still need a human</h1>
+<p class="lead">Hallee flagged 70 bouts. With the code as of today, <b>35 are fixed</b> and <b>31 still need manual work</b> (1 of those is already rescored). The other 4 need no rescoring: three are real early starts and one is a question about how the target distance is defined.</p>
+</header>
+
+<section>
+<div class="bar"><div class="seg fa" style="flex:35" title="fixed by code">35</div><div class="seg nr" style="flex:31" title="still manual">31</div><div class="seg nm" style="flex:4" title="no action / decision">4</div></div>
+<ul class="legend"><li><span class="sw fa"></span>fixed by code (35)</li><li><span class="sw nr"></span>still manual (31)</li><li><span class="sw nm"></span>no action or team decision (4)</li></ul>
+</section>
+
+<section>
+<h2>How to work through the list</h2>
+<ol class="steps">
+<li>Pull <code>main</code>, restart the kernel, and run the s07_s08 notebook from the top so the automatic scoring uses the new code.</li>
+<li>Go group by group below, in order. The first two groups change results the most; the last group changes each bout by about 0.1 m.</li>
+<li>Use <b>G2 (drag)</b> to move a start or end, <b>G3 (click)</b> to score a bout that has no snip, and <b>G4</b> (<code>scoring.unmatch</code>, <code>set_window</code>) to remove a wrong match or type exact times. Every save is written to the rescore file straight away.</li>
+<li>Run section H at the end to see every change you made next to the automatic result.</li>
+</ol>
+</section>
+
+<section class="grp" id="nodata" style="--c:var(--nr)">
+<div class="head"><h2>No walk recorded: 4 bouts <span class="fixlbl">[score by hand]</span></h2><span class="chip nr">Must do</span></div>
+<p>These bouts have no usable snip, so there is no distance for them at all. Trial 1 rep 1 was never clicked. In 37.2 the snip matched to bout 1 is standing drift (0 steps, 0.06 m walked), and bout 2 was never found.</p>
+<p class="soft tool">Tool: G3 (click), or G4 (type the times)</p>
+<div class="tbl"><table><thead><tr><th>Bout</th><th>Her note (transcribed)</th><th>What the code does now</th><th>Walked / target</th></tr></thead><tbody>
+<tr><td class="mono">1.1 b1</td><td>no presses; known missed trial-rep</td><td>No matched snip: never clicked, or missed by the alignment.</td><td class="mono nowrap"></td></tr>
+<tr><td class="mono">1.1 b2</td><td>no presses</td><td>No matched snip: never clicked, or missed by the alignment.</td><td class="mono nowrap"></td></tr>
+<tr><td class="mono">37.2 b1</td><td>&quot;disaster, no step data&quot;: matched snip has 0 steps, walked 0.06 m</td><td>Matched snip has 0.0 steps and walked 0.06 m: standing drift, not a walk.</td><td class="mono nowrap">0.06 / 2.5 m · 0 steps</td></tr>
+<tr><td class="mono">37.2 b2</td><td>bout missed by the alignment</td><td>No matched snip: never clicked, or missed by the alignment.</td><td class="mono nowrap"></td></tr>
+</tbody></table></div></section><section class="grp" id="first" style="--c:var(--fd)">
+<div class="head"><h2>First step left out: 4 bouts <span class="fixlbl">[drag the start earlier]</span></h2><span class="chip fd">Worth doing</span></div>
+<p>The automatic start still sits after the first step. The chain-back fix only follows steps faster than 1.25 m/s, and these first steps are slower, or there is more stepping before the new start. Each one costs about one step (0.3-0.7 m).</p>
+<p class="soft tool">Tool: G2 (drag)</p>
+<div class="tbl"><table><thead><tr><th>Bout</th><th>Her note (transcribed)</th><th>What the code does now</th><th>Walked / target</th></tr></thead><tbody>
+<tr><td class="mono">12.1 b2</td><td>possible missed first step; start at the -1 s search limit</td><td>Unchanged: the first step is probably slower than the 1.25 m/s that counts as a real step.</td><td class="mono nowrap">10.80 / 12 m · 16 steps</td></tr>
+<tr><td class="mono">23.1 b2</td><td>didn&#x27;t pick up first step; a swing ends just before the start [?bout]</td><td>Gained a step (steps 7 -&gt; 8.0) but there is still stepping just before the new start.</td><td class="mono nowrap">4.09 / 5 m · 8 steps</td></tr>
+<tr><td class="mono">28.2 b2</td><td>needs to include first step [?bout]</td><td>Unchanged: the first step is probably slower than the 1.25 m/s that counts as a real step.</td><td class="mono nowrap">5.00 / 5 m · 9 steps</td></tr>
+<tr><td class="mono">46.1 b2</td><td>possible missed first step; a swing ends before the start</td><td>Start moved but no step gained.</td><td class="mono nowrap">1.58 / 2.5 m · 4 steps</td></tr>
+</tbody></table></div></section><section class="grp" id="dist" style="--c:var(--fb)">
+<div class="head"><h2>Distance reads over target: 3 bouts <span class="fixlbl">[check the end]</span></h2><span class="chip fb">Worth doing</span></div>
+<p>Most bouts read 0.55-0.70 m under target. These three read over it, which usually means the end runs into the next movement or the last footsteps drifted. Look at where the bout ends.</p>
+<p class="soft tool">Tool: G2 (drag)</p>
+<div class="tbl"><table><thead><tr><th>Bout</th><th>Her note (transcribed)</th><th>What the code does now</th><th>Walked / target</th></tr></thead><tbody>
+<tr><td class="mono">27.2 b2</td><td>&quot;5.5 / 5&quot;; walked 5.3 now</td><td>Still reads over target: walked 5.34 m for 5 m (most bouts read ~0.6 m under).</td><td class="mono nowrap">5.34 / 5 m · 9 steps</td></tr>
+<tr><td class="mono">38.2 b2</td><td>&quot;1 m over expected&quot;; walked 2.6 now</td><td>Still reads over target: walked 2.63 m for 2.5 m (most bouts read ~0.6 m under).</td><td class="mono nowrap">2.63 / 2.5 m · 6 steps</td></tr>
+<tr><td class="mono">42.2 b2</td><td>&quot;both over distance&quot;; walked 2.85 now</td><td>Still reads over target: walked 2.85 m for 2.5 m (most bouts read ~0.6 m under).</td><td class="mono nowrap">2.85 / 2.5 m · 6 steps</td></tr>
+</tbody></table></div></section><section class="grp" id="stop" style="--c:var(--nv)">
+<div class="head"><h2>Hallee asked for video: 9 bouts <span class="fixlbl">[check video, then drag]</span></h2><span class="chip nv">Needs video</span></div>
+<p>She was unsure where these bouts stop or start. The data shows no clear problem either way, so the code can not settle it. Watch the video first; only drag if the video shows the walk ending or starting somewhere else.</p>
+<p class="soft tool">Tool: Video, then G2 (drag)</p>
+<div class="tbl"><table><thead><tr><th>Bout</th><th>Her note (transcribed)</th><th>What the code does now</th><th>Walked / target</th></tr></thead><tbody>
+<tr><td class="mono">4.2 b1</td><td>botched trial, video review</td><td>She asked for video. The data shows no clear problem either way.</td><td class="mono nowrap">11.13 / 12 m · 17 steps</td></tr>
+<tr><td class="mono">4.2 b2</td><td>botched trial, video review</td><td>She asked for video. The data shows no clear problem either way.</td><td class="mono nowrap">10.30 / 12 m · 16 steps</td></tr>
+<tr><td class="mono">13.2 b1</td><td>bout 1 watch video</td><td>She asked for video. The data shows no clear problem either way.</td><td class="mono nowrap">1.86 / 2.5 m · 4 steps</td></tr>
+<tr><td class="mono">18.1 b2</td><td>watch video to see end</td><td>She asked for video. The data shows no clear problem either way.</td><td class="mono nowrap">6.63 / 8 m · 10 steps</td></tr>
+<tr><td class="mono">20.1 b2</td><td>watch video; extended 2 s</td><td>She asked for video. The data shows no clear problem either way.</td><td class="mono nowrap">3.98 / 5 m · 9 steps</td></tr>
+<tr><td class="mono">20.2 b2</td><td>watch video</td><td>She asked for video. The data shows no clear problem either way.</td><td class="mono nowrap">4.72 / 5 m · 8 steps</td></tr>
+<tr><td class="mono">41.2 b1</td><td>verify Stop button accuracy</td><td>She asked for video. The data shows no clear problem either way.</td><td class="mono nowrap">7.23 / 8 m · 13 steps</td></tr>
+<tr><td class="mono">43.1 b2</td><td>&quot;shorten to not include last step?&quot;</td><td>She asked for video. The data shows no clear problem either way.</td><td class="mono nowrap">11.69 / 12 m · 18 steps</td></tr>
+<tr><td class="mono">43.2 b1</td><td>watch video bout 1</td><td>She asked for video. The data shows no clear problem either way.</td><td class="mono nowrap">10.78 / 12 m · 16 steps</td></tr>
+</tbody></table></div></section><section class="grp" id="last" style="--c:var(--nm)">
+<div class="head"><h2>Last step left out: 11 bouts <span class="fixlbl">[drag the end later (optional)]</span></h2><span class="chip nm">Low value</span></div>
+<p>The bout ends one step early: the closing step is slower than 1.25 m/s, so it does not count as a real step. Each costs about 0.1 m of distance and one step of count. No code change handles this yet. Do these last, or skip them if 0.1 m does not matter for the analysis.</p>
+<p class="soft tool">Tool: G2 (drag)</p>
+<div class="tbl"><table><thead><tr><th>Bout</th><th>Her note (transcribed)</th><th>What the code does now</th><th>Walked / target</th></tr></thead><tbody>
+<tr><td class="mono">1.2 b1</td><td>&quot;rep 1 ... missing last step&quot; [?which bout]</td><td>A slow closing step (under 1.25 m/s) follows the gait end and is not counted.</td><td class="mono nowrap">4.95 / 5 m · 9 steps</td></tr>
+<tr><td class="mono">2.1 b1</td><td>missed last step; walked 10.7/12</td><td>A slow closing step (under 1.25 m/s) follows the gait end and is not counted.</td><td class="mono nowrap">10.72 / 12 m · 15 steps</td></tr>
+<tr><td class="mono">2.1 b2</td><td>missed last step; walked 10.6/12, stop not found</td><td>No code change addresses this; the end may sit one step early.</td><td class="mono nowrap">10.61 / 12 m · 16 steps</td></tr>
+<tr><td class="mono">3.2 b2</td><td>&quot;bout 2 corrected&quot;: 4 steps, 2.1 s gait, 3 swings after the end [?direction]</td><td>No code change addresses this; the end may sit one step early.</td><td class="mono nowrap">1.82 / 2.5 m · 4 steps</td></tr>
+<tr class=done><td class="mono">10.1 b1</td><td>&quot;didn&#x27;t select whole bout&quot;; 10.4/12, needed a 2 s extension</td><td>Already rescored by hand (end moved from 1520.7 s to 1524.6 s). Check it, then skip.</td><td class="mono nowrap">10.38 / 12 m · 14 steps</td></tr>
+<tr><td class="mono">34.1 b2</td><td>potential missed end step</td><td>A slow closing step (under 1.25 m/s) follows the gait end and is not counted.</td><td class="mono nowrap">4.20 / 5 m · 8 steps</td></tr>
+<tr><td class="mono">35.2 b2</td><td>potentially missed last step [?bout]</td><td>A slow closing step (under 1.25 m/s) follows the gait end and is not counted.</td><td class="mono nowrap">7.77 / 8 m · 13 steps</td></tr>
+<tr><td class="mono">37.1 b2</td><td>last step missed; 4 steps, 1.7/2.5</td><td>A slow closing step (under 1.25 m/s) follows the gait end and is not counted.</td><td class="mono nowrap">1.72 / 2.5 m · 4 steps</td></tr>
+<tr><td class="mono">38.1 b2</td><td>potentially missed last step</td><td>A slow closing step (under 1.25 m/s) follows the gait end and is not counted.</td><td class="mono nowrap">1.97 / 2.5 m · 5 steps</td></tr>
+<tr><td class="mono">44.1 b2</td><td>&quot;last step looks odd&quot;</td><td>No code change addresses this; the end may sit one step early.</td><td class="mono nowrap">7.76 / 8 m · 14 steps</td></tr>
+<tr><td class="mono">46.2 b1</td><td>&quot;extended to capture blue step&quot;; 2 swings between gait end and Stop press</td><td>No code change addresses this; the end may sit one step early.</td><td class="mono nowrap">2.09 / 2.5 m · 5 steps</td></tr>
+</tbody></table></div></section>
+
+<section>
+<h2>Fixed by code: 35 bouts [nothing to do]</h2>
+<p>Rechecked with today's code. If one of these still looks wrong in the new figures, add it to the worklist.</p>
+<details><summary>Show the 35 fixed bouts</summary>
+<div class="tbl"><table><thead><tr><th>Bout</th><th>Hallee's problem</th><th>What changed</th></tr></thead><tbody>
+<tr><td class="mono">15.2 b2</td><td>Distance looked wrong</td><td>Her number was the alignment estimate. Walked distance now reads 7.89 m for 8 m.</td></tr>
+<tr><td class="mono">16.2 b1</td><td>Distance looked wrong</td><td>Her number was the alignment estimate. Walked distance now reads 1.91 m for 2.5 m.</td></tr>
+<tr><td class="mono">18.2 b2</td><td>Distance looked wrong</td><td>Her number was the alignment estimate. Walked distance now reads 7.35 m for 8 m.</td></tr>
+<tr><td class="mono">21.2 b1</td><td>Distance looked wrong</td><td>Her number was the alignment estimate. Walked distance now reads 11.79 m for 12 m.</td></tr>
+<tr><td class="mono">30.1 b1</td><td>Distance looked wrong</td><td>Her number was the alignment estimate. Walked distance now reads 4.64 m for 5 m.</td></tr>
+<tr><td class="mono">32.2 b1</td><td>Distance looked wrong</td><td>Her number was the alignment estimate. Walked distance now reads 2.02 m for 2.5 m.</td></tr>
+<tr><td class="mono">34.2 b2</td><td>Distance looked wrong</td><td>Her number was the alignment estimate. Walked distance now reads 4.69 m for 5 m.</td></tr>
+<tr><td class="mono">39.2 b2</td><td>Distance looked wrong</td><td>Her number was the alignment estimate. Walked distance now reads 2.28 m for 2.5 m.</td></tr>
+<tr><td class="mono">42.2 b1</td><td>Distance looked wrong</td><td>Her number was the alignment estimate. Walked distance now reads 2.09 m for 2.5 m.</td></tr>
+<tr><td class="mono">12.1 b1</td><td>First step left out</td><td>Start followed back 0.6 s: steps 15 -&gt; 16.0, walked 10.69 -&gt; 10.92 m.</td></tr>
+<tr><td class="mono">34.1 b1</td><td>First step left out</td><td>Start followed back 0.6 s: steps 6 -&gt; 7.0, walked 3.72 -&gt; 4.02 m.</td></tr>
+<tr><td class="mono">45.1 b2</td><td>First step left out</td><td>Start followed back 2.0 s: steps 7 -&gt; 9.0, walked 2.92 -&gt; 4.50 m.</td></tr>
+<tr><td class="mono">24.2 b1</td><td>Unsure of the stop</td><td>Walk back removed at the turn: gait 4.4 -&gt; 3.3 s.</td></tr>
+<tr><td class="mono">3.1 b1</td><td>Walked back past the end</td><td>Walk back removed at the turn: gait 5.8 -&gt; 2.3 s, steps 8 -&gt; 4.0, walked 1.55 m.</td></tr>
+<tr><td class="mono">4.1 b2</td><td>Walked back past the end</td><td>Walk back removed at the turn: gait 10.5 -&gt; 8.6 s, steps 19 -&gt; 17.0, walked 11.34 m.</td></tr>
+<tr><td class="mono">7.2 b2</td><td>Walked back past the end</td><td>Walk back removed at the turn: gait 14.9 -&gt; 10.0 s, steps 22 -&gt; 19.0, walked 12.39 m.</td></tr>
+<tr><td class="mono">8.1 b2</td><td>Walked back past the end</td><td>Walk back removed at the turn: gait 13.5 -&gt; 6.2 s, steps 24 -&gt; 12.0, walked 7.08 m.</td></tr>
+<tr><td class="mono">9.1 b2</td><td>Walked back past the end</td><td>Walk back removed at the turn: gait 11.4 -&gt; 4.0 s, steps 15 -&gt; 8.0, walked 4.60 m.</td></tr>
+<tr><td class="mono">9.2 b2</td><td>Walked back past the end</td><td>Walk back removed at the turn: gait 12.4 -&gt; 5.0 s, steps 17 -&gt; 9.0, walked 5.11 m.</td></tr>
+<tr><td class="mono">13.1 b2</td><td>Walked back past the end</td><td>Walk back removed at the turn: gait 6.2 -&gt; 2.2 s, steps 8 -&gt; 4.0, walked 1.58 m.</td></tr>
+<tr><td class="mono">13.2 b2</td><td>Walked back past the end</td><td>Walk back removed at the turn: gait 7.3 -&gt; 2.6 s, steps 8 -&gt; 5.0, walked 2.43 m.</td></tr>
+<tr><td class="mono">14.2 b2</td><td>Walked back past the end</td><td>Walk back removed at the turn: gait 10.2 -&gt; 4.3 s, steps 16 -&gt; 8.0, walked 4.42 m.</td></tr>
+<tr><td class="mono">19.1 b2</td><td>Walked back past the end</td><td>Walk back removed at the turn: gait 12.3 -&gt; 10.6 s, steps 17 -&gt; 18.0, walked 12.08 m.</td></tr>
+<tr><td class="mono">21.1 b2</td><td>Walked back past the end</td><td>Walk back removed at the turn: gait 15.5 -&gt; 9.7 s, steps 22 -&gt; 18.0, walked 11.44 m.</td></tr>
+<tr><td class="mono">22.1 b2</td><td>Walked back past the end</td><td>Walk back removed at the turn: gait 6.2 -&gt; 2.4 s, steps 7 -&gt; 5.0, walked 2.28 m.</td></tr>
+<tr><td class="mono">22.2 b1</td><td>Walked back past the end</td><td>Walk back removed at the turn: gait 5.5 -&gt; 2.6 s, steps 5 -&gt; 5.0, walked 1.96 m.</td></tr>
+<tr><td class="mono">24.2 b2</td><td>Walked back past the end</td><td>Walk back removed at the turn: gait 4.8 -&gt; 2.2 s, steps 6 -&gt; 4.0, walked 2.05 m.</td></tr>
+<tr><td class="mono">25.2 b2</td><td>Walked back past the end</td><td>Walk back removed at the turn: gait 6.0 -&gt; 2.2 s, steps 8 -&gt; 4.0, walked 1.98 m.</td></tr>
+<tr><td class="mono">26.2 b2</td><td>Walked back past the end</td><td>Walk back removed at the turn: gait 11.8 -&gt; 8.9 s, steps 18 -&gt; 17.0, walked 11.31 m.</td></tr>
+<tr><td class="mono">33.2 b1</td><td>Walked back past the end</td><td>Walk back removed at the turn: gait 8.0 -&gt; 6.7 s, steps 12 -&gt; 12.0, walked 7.15 m.</td></tr>
+<tr><td class="mono">36.2 b2</td><td>Walked back past the end</td><td>Walk back removed at the turn: gait 11.8 -&gt; 5.8 s, steps 18 -&gt; 11.0, walked 7.37 m.</td></tr>
+<tr><td class="mono">42.1 b2</td><td>Walked back past the end</td><td>Walk back removed at the turn: gait 9.3 -&gt; 2.8 s, steps 10 -&gt; 5.0, walked 2.22 m.</td></tr>
+<tr><td class="mono">45.2 b1</td><td>Walked back past the end</td><td>Walk back removed at the turn: gait 12.4 -&gt; 5.3 s, steps 18 -&gt; 8.0, walked 4.22 m.</td></tr>
+<tr><td class="mono">46.2 b2</td><td>Walked back past the end</td><td>Walk back removed at the turn: gait 4.9 -&gt; 2.5 s, steps 6 -&gt; 5.0, walked 2.48 m.</td></tr>
+<tr><td class="mono">48.1 b2</td><td>Walked back past the end</td><td>Walk back removed at the turn: gait 10.0 -&gt; 4.2 s, steps 17 -&gt; 8.0, walked 4.49 m.</td></tr>
+</tbody></table></div></details>
+</section>
+
+<section>
+<h2>No rescoring needed: 4 bouts</h2>
+<div class="tbl"><table><thead><tr><th>Bout</th><th>Her note (transcribed)</th><th>Why no rescore</th></tr></thead><tbody>
+<tr><td class="mono">3.1 b2</td><td>&quot;starts before start&quot;; came_back + 2 s extension</td><td>Started before the Start press: real behaviour, not a scoring error. The start now follows the early steps back 0.7 s.</td></tr>
+<tr><td class="mono">6.1 b2</td><td>&quot;started before command&quot;; reaction -0.98 s (at the 1 s limit)</td><td>Started before the Start press: real behaviour, not a scoring error.</td></tr>
+<tr><td class="mono">36.1 b1</td><td>&quot;&gt;1 m missing on 8 m&quot;; walked 6.9 [?bout]</td><td>Walked 6.90 m for 8 m. Every bout reads ~0.55-0.70 m under target at every distance: likely where walkers stop for the hand-off. Decide whether the target is measured to the feet; no rescoring.</td></tr>
+<tr><td class="mono">39.1 b2</td><td>possible hesitation</td><td>Started before the Start press: real behaviour, not a scoring error.</td></tr>
+</tbody></table></div>
+<p class="soft">Trial 7 rep 1: "no changes. (orange margin) Person A ran over [?]" is marked no change and names no bout, so it is not in the list.</p>
+</section>
+
+<section>
+<h2>How this was decided</h2>
+<p>Each of the 70 flagged bouts was rerun through the current pipeline (<code>bout_sync_strides_steps</code> on main <span class="mono">afbf137</span>, automatic snips from <code>brock_s07_s08_auto_aligned.csv</code>) and compared with the old result. Rules per problem type:</p>
+<ul class="steps">
+<li><b>Walked back:</b> fixed if the walk-back cut fired and no backward steps remain.</li>
+<li><b>First step left out:</b> fixed if the start moved back and gained a step, with no committed stepping left just before the new start.</li>
+<li><b>Distance looked wrong:</b> fixed if walked distance is now at or under target (+0.1 m). Most of her numbers were the old alignment estimate, which the rename to <code>align_max_m</code> already separated from walked distance.</li>
+<li><b>Last step left out</b> and <b>unsure of the stop:</b> no code change addresses these yet, so they stay manual unless the walk-back cut moved the end.</li>
+</ul>
+<p class="soft">These are automatic checks. A bout marked fixed can still look wrong in its figure, so treat the figures as the final word.</p>
+</section>
+</main>

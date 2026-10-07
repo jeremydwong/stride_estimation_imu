@@ -165,6 +165,14 @@ CHAIN_BACK = True
 CHAIN_GAP_S = 0.6
 CHAIN_MAX_S = 3.0
 
+# The top plot also shows the NEIGHBOURING trials, so you can see which walk
+# you are looking at: NEIGHBOR_S seconds either side of the shown bouts. In
+# s07_s08 the gap from one trial's last Stop to the next trial's first Start
+# is ~36 s (90% within 54 s), so 60 s usually brings in both neighbours.
+NEIGHBOR_S = 60.0
+NEIGHBOR_COLORS = ('#b35806', '#542788', '#1f78b4', '#c51b7d', '#8c510a',
+                   '#2166ac')          # cycled by trial number
+
 
 def _foot_speeds(feet, subject, a, b, period):
     """|V| of both of the subject's feet mechanized over [a, b); None if the
@@ -1599,7 +1607,8 @@ def _build_inspect_figure(feet, aligned, trial, rep=None, session_tag='',
                                 imu.STEPSPEED_YMAX),
                           initial_separation=0.2, anchor_mode='firstonly',
                           pad_s=5.0, plot_every=1,
-                          interactive=False, resnug=True):
+                          interactive=False, resnug=True,
+                          neighbor_s=NEIGHBOR_S):
     """THE inspection-figure layout, shared by the static and drag versions.
 
     Per repetition: a foot-speed overview (_draw_foot_speed_overview) across
@@ -1642,7 +1651,8 @@ def _build_inspect_figure(feet, aligned, trial, rep=None, session_tag='',
         ov_ax = fig.add_axes([0.07, 1 - (top + ov_h) / fig_h, 0.84,
                               ov_h / fig_h])
         _draw_foot_speed_overview(ov_ax, feet, sec, period,
-                                  pad_s=pad_s, every=plot_every)
+                                  neighbor_s=neighbor_s, every=plot_every,
+                                  aligned=aligned)
         ov_ax.set_title(f"rep {int(sec['rep'].iloc[0])}", loc='left',
                         fontsize=9, fontweight='bold')
         top += ov_h + head_h
@@ -1678,7 +1688,8 @@ def inspect_snipped_trial(feet, aligned, trial, session_tag='',
                           ymax=(imu.ACCEL_YMAX, imu.FOOTSPEED_YMAX,
                                 imu.STEPSPEED_YMAX),
                           initial_separation=0.2, anchor_mode='firstonly',
-                          pad_s=5.0, plot_every=1, rep=None, resnug=True):
+                          pad_s=5.0, plot_every=1, rep=None, resnug=True,
+                          neighbor_s=NEIGHBOR_S):
     """Draw the full inspection figure for ONE trial and return the Figure.
 
     On top, a foot-speed OVERVIEW: every foot on one session-time axis from
@@ -1719,9 +1730,12 @@ def inspect_snipped_trial(feet, aligned, trial, session_tag='',
         When given, the figure is also written to this file (format from the
         extension). None = just build it.
     pad_s : float
-        Seconds of context: the overview spans pad_s before the first / after
-        the last bout, and each bout block shows pad_s of grey context on
-        both sides.
+        Seconds of grey context each bout block shows on both sides.
+    neighbor_s : float
+        Seconds the top foot-speed overview spans before the first / after
+        the last bout (default NEIGHBOR_S = 60, usually enough to bring in
+        the previous and next trials). Neighbouring trials' bouts are shaded
+        in their own colours and labelled 'T2 b1 (A)'.
     resnug : bool
         Snug manual windows like button presses (default; see bout_sync_strides_steps).
         False draws a manual window as the gait itself.
@@ -1740,7 +1754,8 @@ def inspect_snipped_trial(feet, aligned, trial, session_tag='',
         feet, aligned, trial, rep=rep, session_tag=session_tag,
         prefix_seconds=prefix_seconds, ymax=ymax,
         initial_separation=initial_separation, anchor_mode=anchor_mode,
-        pad_s=pad_s, plot_every=plot_every, resnug=resnug)
+        pad_s=pad_s, plot_every=plot_every, resnug=resnug,
+        neighbor_s=neighbor_s)
     if save_path is not None:
         fig.savefig(save_path)
     return fig
@@ -1751,7 +1766,7 @@ def save_trial_figures(feet, aligned, session_tag, out_dir=None,
                        ymax=(imu.ACCEL_YMAX, imu.FOOTSPEED_YMAX,
                              imu.STEPSPEED_YMAX), initial_separation=0.2,
                        anchor_mode='firstonly', pad_s=5.0,
-                       plot_every=1, resnug=True):
+                       plot_every=1, resnug=True, neighbor_s=NEIGHBOR_S):
     """Batch wrapper: inspect_snipped_trial() per trial REPETITION, to disk.
 
     One file per (trial, rep) - each rep's foot-speed overview plus its bout
@@ -1801,7 +1816,8 @@ def save_trial_figures(feet, aligned, session_tag, out_dir=None,
                 feet, aligned, trial, rep=rep, session_tag=session_tag,
                 save_path=path, ymax=ymax,
                 initial_separation=initial_separation, anchor_mode=anchor_mode,
-                pad_s=pad_s, plot_every=plot_every, resnug=resnug)
+                pad_s=pad_s, plot_every=plot_every, resnug=resnug,
+                neighbor_s=neighbor_s)
         except ValueError:
             continue                      # no matched bouts for this rep
         plt.close(fig)
@@ -1902,6 +1918,41 @@ def _decimate_lines(axes, every):
 OVERVIEW_COLOR = {'a': 'black', 'b': 'tab:green'}   # person 1 / person 2
 
 
+def _neighbor_bouts(aligned, trial, rep, lo, hi):
+    """Other trial-reps' bouts with a window overlapping [lo, hi] session s:
+    [(label 'T2 b1 (A)', start_s, stop_s, color), ...]. Missed bouts (no
+    window) are left out; works at the session's first and last trials."""
+    if aligned is None:
+        return []
+    a = aligned[aligned['start_s'].notna() & aligned['stop_s'].notna()]
+    a = a[~((a['trial'] == trial) & (a['rep'] == rep))]
+    a = a[(a['stop_s'] >= lo) & (a['start_s'] <= hi)]
+    out = []
+    for r in a.sort_values('start_s').itertuples():
+        w = str(r.walker) if pd.notna(r.walker) else ''
+        who = f' ({w[-1].upper()})' if w else ''
+        out.append((f'T{int(r.trial)} b{int(r.bout)}{who}', float(r.start_s),
+                    float(r.stop_s),
+                    NEIGHBOR_COLORS[int(r.trial) % len(NEIGHBOR_COLORS)]))
+    return out
+
+
+def _draw_neighbor_bouts(ax, neighbors, label=True, y=0.98):
+    """Shade + label neighbouring bouts on one time axis (session seconds):
+    a light band in the trial's colour, dashed lines at its start/stop (the
+    button presses unless corrected) and a 'T2 b1 (A)' label at the top."""
+    tr = ax.get_xaxis_transform()
+    for lab, a, b, col in neighbors:
+        ax.axvspan(a, b, color=col, alpha=0.15, lw=0)
+        for t in (a, b):
+            ax.axvline(t, color=col, lw=1.0, ls=':', alpha=0.9)
+        if label:   # white backing: the label sits over the speed traces
+            ax.text(a, y, f' {lab}', transform=tr, va='top', ha='left',
+                    fontsize=7, fontweight='bold', color=col, clip_on=True,
+                    zorder=5, bbox=dict(boxstyle='square,pad=0.15', fc='white',
+                                        ec='none', alpha=0.85))
+
+
 def _bout_window_s(row, st, period):
     """(start_s, stop_s) of a bout's window, with any drag adjustments."""
     start = (st['i0_abs'] * period if 'i0_abs' in st else
@@ -1924,18 +1975,22 @@ def _shade_overview_bout(ax, row, start_s, stop_s):
     return arts
 
 
-def _draw_foot_speed_overview(ax, feet, rows, period, pad_s=5.0, every=1):
+def _draw_foot_speed_overview(ax, feet, rows, period, neighbor_s=NEIGHBOR_S,
+                              every=1, aligned=None):
     """Every foot's speed across all shown bouts, on one session-time axis.
 
-    Spans pad_s before the first bout start to pad_s after the last bout end.
+    Spans neighbor_s before the first bout start to neighbor_s after the last
+    bout end (clipped to the recording), and - when `aligned` is given - marks
+    the neighbouring trials' bouts in that span (_draw_neighbor_bouts), so the
+    viewer can see which walk is which.
     Person a (s1) black, person b (s2) green; left foot solid, right dashed.
     Foot speed is heading-agnostic, so both walkers compare directly. Each
     foot is mechanized over the whole window (ZUPT keeps stance at ~0).
     Returns the window (lo_s, hi_s).
     """
     n_samples = min(len(rec) for rec in feet.values())
-    lo = max(0.0, float(rows['start_s'].min()) - pad_s)
-    hi = min(n_samples * period, float(rows['stop_s'].max()) + pad_s)
+    lo = max(0.0, float(rows['start_s'].min()) - neighbor_s)
+    hi = min(n_samples * period, float(rows['stop_s'].max()) + neighbor_s)
     j0, j1 = int(lo / period), int(hi / period)
     t = np.arange(j0, j1) * period
     step = max(1, int(every or 1))
@@ -1955,6 +2010,9 @@ def _draw_foot_speed_overview(ax, feet, rows, period, pad_s=5.0, every=1):
                 label=label.replace('_foot', ''))
     ax.set_xlim(lo, hi)
     ax.set_ylim(0, imu.FOOTSPEED_YMAX)
+    _draw_neighbor_bouts(ax, _neighbor_bouts(
+        aligned, int(rows['trial'].iloc[0]), int(rows['rep'].iloc[0]), lo, hi),
+        y=0.86)    # below this trial's own bout labels (y=0.98)
     ax.set_ylabel('foot speed [m/s]')
     ax.set_xlabel('session time [s]', labelpad=1)
     ax.grid(alpha=0.3)
@@ -2304,14 +2362,16 @@ def interactive_inspect_trial(feet, aligned, trial, session_tag='',
                                     imu.STEPSPEED_YMAX),
                               initial_separation=0.2,
                               anchor_mode='firstonly', rep=None,
-                              pad_s=5.0, plot_every=1, resnug=True):
+                              pad_s=5.0, plot_every=1, resnug=True,
+                              neighbor_s=NEIGHBOR_S):
     """inspect_snipped_trial(), but with DRAGGABLE gait start and bout end.
 
     A foot-speed OVERVIEW sits above the bout blocks: every foot on one
-    session-time axis from `pad_s` before the first shown bout to
-    `pad_s` after the last (person A black, B green; right foot
-    dashed), each bout's current window shaded - so you see where in time
-    both people's bouts fall. Each bout block also shows `pad_s` of grey
+    session-time axis from `neighbor_s` (60 s) before the first shown bout to
+    `neighbor_s` after the last (person A black, B green; right foot
+    dashed), each bout's current window shaded, and the NEIGHBOURING trials'
+    bouts shaded in their own colours and labelled 'T2 b1 (A)' - so you see
+    which walk is which. Each bout block also shows `pad_s` of grey
     context (raw |A| and foot speed) on both sides of the analysed walk;
     DOUBLE-CLICK a block's time axes left or right of centre to see
     `extend_s` (5 s) more on that side - view only, then drag a line out
@@ -2359,7 +2419,7 @@ def interactive_inspect_trial(feet, aligned, trial, session_tag='',
         prefix_seconds=prefix_seconds, ymax=ymax,
         initial_separation=initial_separation, anchor_mode=anchor_mode,
         pad_s=pad_s, plot_every=plot_every,
-        interactive=True, resnug=resnug)
+        interactive=True, resnug=resnug, neighbor_s=neighbor_s)
     pairs = feet_pairs_from_labels(feet)
     period = next(iter(feet.values())).period
     ctrl = _DraggableTrial(fig, feet, pairs, period, blocks, prefix_seconds,
@@ -2595,7 +2655,8 @@ class _RescoreFigure:
     def _draw_context(self):
         """What else is in view, so you can be sure WHICH walk you score:
         dashed target distance on the excursion panel; every OTHER trial's
-        bout shaded grey and labelled (T2 r1 b1 A); Start/Stop presses as
+        bout shaded in its trial's colour and labelled (T2 b1 (A)), dotted
+        lines at its start/stop; Start/Stop presses as
         thin green/purple lines; a missed bout's ESTIMATED position (from
         its neighbours in the trial sequence) as a red dashed line."""
         ctx, (lo, hi) = self.context, self.window
@@ -2605,13 +2666,9 @@ class _RescoreFigure:
             ax_ex.axhline(ctx['target_m'], color='0.25', ls='--', lw=1.0,
                           label=f"target {ctx['target_m']:g} m")
             ax_ex.legend(fontsize=7, loc='upper left')
-        for lab, a, b in ctx.get('others', []):
-            if b < lo or a > hi:
-                continue
-            for ax in self.axes:
-                ax.axvspan(a, b, color='0.5', alpha=0.10, lw=0)
-            ax0.text(max(a, lo), 0.98, lab, transform=top, fontsize=7,
-                     color='0.35', va='top', ha='left', clip_on=True)
+        shown = [o for o in ctx.get('others', []) if o[2] >= lo and o[1] <= hi]
+        for k, ax in enumerate(self.axes):
+            _draw_neighbor_bouts(ax, shown, label=(k == 0))
         for t_s, lab in ctx.get('presses', []):
             if lo <= t_s <= hi:
                 col = '#1a7f37' if lab == 'Start' else '#8250df'
@@ -2733,7 +2790,7 @@ class _RescoreFigure:
 
 
 def manual_correct(feet, aligned, trials, out_csv='brock_manual_rescore.csv',
-                   pad_s=10.0, session_tag='', plot_every=1, resnug=True):
+                   pad_s=10.0, neighbor_s=NEIGHBOR_S, session_tag='', plot_every=1, resnug=True):
     """Interactive inspection + click-to-resnip for a list of trials.
 
     For each requested (trial, rep) this brings up an inspection figure -
@@ -2757,7 +2814,11 @@ def manual_correct(feet, aligned, trials, out_csv='brock_manual_rescore.csv',
     load_available_feet(); `aligned` is the per-bout results table from
     align_snips_to_trial_table() (start_s/stop_s = the snip bounds in
     session seconds). The inspection window covers
-    both bouts of the rep plus `pad_s` on each side; missed bouts (no snip)
+    both bouts of the rep plus max(`pad_s`, `neighbor_s`) on each side
+    (neighbor_s default 60 s: usually enough to show the previous and next
+    trials, whose bouts are shaded in their own colours and labelled
+    'T2 b1 (A)'; type a narrower from/to window to zoom in, or pass
+    neighbor_s=0 for the old tight window); missed bouts (no snip)
     get their window from the time-interpolated bout position, so there is
     always something to look at.
 
@@ -2823,20 +2884,13 @@ def manual_correct(feet, aligned, trials, out_csv='brock_manual_rescore.csv',
         fig.subplots_adjust(bottom=0.16, hspace=0.08)
         fig.suptitle(f'{session_tag} trial {trial} rep {rep} '
                      f'(target {group["distance_m"].iloc[0]:g} m) - inspect / rescore\n'
-                     f'A blue, B orange; other trials grey + labelled; '
+                     f'A blue, B orange; other trials coloured + labelled; '
                      f'missed bouts: red dashed = estimated position; '
                      f'thin green/purple = Start/Stop presses', fontsize=10)
 
-        def who(w):
-            w = str(w) if pd.notna(w) else ''
-            return w[-1].upper() if w else '?'
-        this = (aligned['trial'] == trial) & (aligned['rep'] == rep)
-        has_win = aligned['start_s'].notna() & aligned['stop_s'].notna()
         context = {
             'target_m': float(group['distance_m'].iloc[0]),
-            'others': [(f"T{int(r.trial)} r{int(r.rep)} b{int(r.bout)} {who(r.walker)}",
-                        float(r.start_s), float(r.stop_s))
-                       for r in aligned[~this & has_win].itertuples()],
+            'others': _neighbor_bouts(aligned, trial, rep, -np.inf, np.inf),
             'presses': presses,
             'estimates': [(f"T{trial} r{rep} b{int(b)}", float(t))
                           for b, t in zip(group.loc[group['start_s'].isna(), 'bout'],
@@ -2844,7 +2898,8 @@ def manual_correct(feet, aligned, trials, out_csv='brock_manual_rescore.csv',
         }
         ctrl = _RescoreFigure(fig, list(axes), trial, rep, rows, out_csv,
                               session_tag, feet, period, n_samples,
-                              window=(lo - pad_s, hi + pad_s),
+                              window=(lo - max(pad_s, neighbor_s),
+                                      hi + max(pad_s, neighbor_s)),
                               plot_every=plot_every, context=context,
                               resnug=resnug)
         # buttons + window text fields along the bottom

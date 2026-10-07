@@ -1219,3 +1219,56 @@ code changes (user-directed: "do all three").
   print + brock_analysis.ipynb table updated). process_bout kept, marked
   LEGACY, for the 4 dataset-1 example scripts only. Engine print-noise
   silenced once per bout. Verified bit-identical (189/189) vs before.
+
+### 2026-10-05 — manual worklist, 12.1 b2 diagnosis, threshold 0.9 trial, neighbour trials in the overview
+
+- **`reports/s07_s08_manual_worklist.html/.csv`** (published): Hallee's 70
+  flagged bouts rerun on main afbf137 - 35 fixed, 31 still manual (grouped:
+  no walk recorded 4, first step 4, over target 3, needs video 9, last step
+  11), 3 real early starts, 1 team decision. 10.1 b1 already rescored.
+- **12.1 b2 missed first step, diagnosed (not yet fixed):** walker started
+  ~1.9 s before the Start press (search floor is press - 1 s); Fix B should
+  catch the 0.53 m initiation step but `chain_back_start` measures speed via
+  `_foot_speeds` (single-foot compute_position, a separate route) over ~4 s
+  of standing that ENDS at the gait start: ZUPT pins velocity only at
+  footfalls, so standing reads 0.6-0.8 m/s and the step 1.05 m/s (< 1.25).
+  Same engine 1 s past the start reads 1.61 m/s. Proposed: chain-back via
+  compute_position_two_imus with the END_LOOKAHEAD_S look-ahead, delete
+  _foot_speeds. Tested on 189: 5 change (12.1 b2 fixed +1 step; 18.1 b2 +1
+  step; 44.2 b2 loses its Fix B chain = likely a correction). Awaiting OK.
+  The worklist's "first steps are slower than 1.25 m/s" wording is wrong for
+  12.1 b2 (measurement, not the step).
+- **Swing threshold now one knob:** snug_start / snug_end /
+  steps_from_footfalls take high/low=None -> read
+  `inertial.DEFAULT_START_FOOTSPEED_HIGH/LOW` at call time (defaults were
+  bound at def time, so changing the constant did nothing). Default still
+  1.25. ab_review switches accept `module.NAME` for stride_imu settings
+  (`--after inertial.DEFAULT_START_FOOTSPEED_HIGH=0.9`).
+- **0.9 m/s trial (NOT adopted in code):** 48/189 bouts change. 23 gain the
+  closing feet-together step at the end (median +0.38 s, +0.06 m walked;
+  5/11 of Hallee's LAST, but also 9 bouts she called clean - systematic, a
+  definition change); 14 starts move earlier (~0.6-1.0 s; 12.1 b2, 18.1 b2,
+  28.2 b1, 23.1 b2 gain; 4.2 b2 jumps -2.35 s onto pre-walk shuffles);
+  6 ends run on 0.7-2.9 s into post-hand-off shuffling (25.1 b2, 46.1 b2,
+  15.2 b1, 25.2 b1, 38.2 b2, 40.2 b2: gait time up, walked ~unchanged); 5
+  ends move earlier (the walk-back detector now sees a turn step: 44.1 b2,
+  17.2 b1 ...). Idea if adopted: require end swings within CHAIN_GAP_S of
+  the previous one (mirror of chain-back) to stop the run-ons.
+- **Figures:** previous s07_s08 set stashed to
+  `figures/s07_s08_stash_2026-10-05_threshold1.25/`; `figures/s07_s08/` (95
+  trial-rep + 2 omnibus + 2 _viz_manual) REGENERATED AT 0.9 m/s with the
+  neighbour overview (regenerated via a scratch script mirroring notebook
+  A-C/F/H; the code default is still 1.25, so the notebook will not reproduce
+  them until the threshold is adopted).
+- **Neighbouring trials in the top plot (user):** `NEIGHBOR_S = 60.0`
+  (s07_s08: last Stop -> next trial's first Start ~36 s, 90% within 54 s).
+  The drag/static overview strip spans +/- neighbor_s around the rep's bouts
+  and `_draw_neighbor_bouts` shades other trial-reps' bouts in a per-trial
+  colour (NEIGHBOR_COLORS) with dotted lines at their bounds and a 'T2 b1 (A)'
+  label (`_neighbor_bouts` clips to the recording; first/last trials just
+  show one side). pad_s now only sets each bout block's grey context.
+  manual_correct (click) gets the same colouring and its window widens to
+  max(pad_s, neighbor_s) (neighbor_s=0 = old tight window). `neighbor_s` on
+  inspect_snipped_trial / save_trial_figures / interactive_inspect_trial /
+  manual_correct (and via ManualScoring.drag/click **kwargs); notebook G2/G3
+  expose NEIGHBOR_S.

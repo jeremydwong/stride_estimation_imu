@@ -1369,9 +1369,12 @@ def touchdown_map(stationary_periods: np.ndarray, period: Optional[float] = None
 
 
 def snug_start(left_info: 'FootTrajectory', right_info: 'FootTrajectory',
-               high: float = DEFAULT_START_FOOTSPEED_HIGH,
-               low: float = DEFAULT_START_FOOTSPEED_LOW) -> Tuple[Optional[int], Optional[str]]:
+               high: Optional[float] = None,
+               low: Optional[float] = None) -> Tuple[Optional[int], Optional[str]]:
     """Find the true walk-start sample to snug the first step onto.
+
+    high/low default (None) to the module's DEFAULT_START_FOOTSPEED_HIGH/LOW,
+    read at call time, so one setting moves every gait-start/end decision.
 
     Bouts are often snipped loosely, so the opening is un-ZUPTed
     standing/box-handling whose drift inflates the first step. To recover the
@@ -1383,6 +1386,8 @@ def snug_start(left_info: 'FootTrajectory', right_info: 'FootTrajectory',
     Returns (sample_idx, 'left'|'right'), or (None, None) if neither foot ever
     reaches `high` (no clear swing — nothing to snug).
     """
+    high = DEFAULT_START_FOOTSPEED_HIGH if high is None else high
+    low = DEFAULT_START_FOOTSPEED_LOW if low is None else low
     Vmap = {'left': left_info.Vm, 'right': right_info.Vm}
     first = None
     for foot, Vm in Vmap.items():
@@ -1404,8 +1409,8 @@ def snug_start(left_info: 'FootTrajectory', right_info: 'FootTrajectory',
 
 
 def snug_end(left_info: 'FootTrajectory', right_info: 'FootTrajectory',
-             high: float = DEFAULT_START_FOOTSPEED_HIGH,
-             low: float = DEFAULT_START_FOOTSPEED_LOW,
+             high: Optional[float] = None,
+             low: Optional[float] = None,
              limit: Optional[int] = None) -> Tuple[Optional[int], Optional[str]]:
     """Reverse of snug_start: last committed swing, then its settling valley.
 
@@ -1421,6 +1426,8 @@ def snug_end(left_info: 'FootTrajectory', right_info: 'FootTrajectory',
     last landing COMPLETED inside the window. None = the historic rule on the
     whole trajectory.
     """
+    high = DEFAULT_START_FOOTSPEED_HIGH if high is None else high
+    low = DEFAULT_START_FOOTSPEED_LOW if low is None else low
     speeds = (('left', left_info.Vm), ('right', right_info.Vm))
 
     def settle(speed, i):
@@ -1576,8 +1583,8 @@ def steps_from_footfalls(left_info: 'FootTrajectory', right_info: 'FootTrajector
                        initial_separation: float = 0.3,
                        min_stride_displacement: float = 0.2,
                        anchor_mode: str = 'auto',
-                       start_high: float = DEFAULT_START_FOOTSPEED_HIGH,
-                       start_low: float = DEFAULT_START_FOOTSPEED_LOW,
+                       start_high: Optional[float] = None,
+                       start_low: Optional[float] = None,
                        force_snap: Optional[int] = None) -> Dict[str, Any]:
     """Segment steps from the merged foot-CONTACT train of the two feet, taking
     speed from the validated per-foot strides and placing both feet in one frame.
@@ -1673,6 +1680,8 @@ def steps_from_footfalls(left_info: 'FootTrajectory', right_info: 'FootTrajector
     # here to recognize opening stances, reported/used for step 1 further down.
     # force_snap (slice-relative sample) overrides the detected snug — used by
     # the interactive inspector when the user drags the gait-start marker.
+    start_high = DEFAULT_START_FOOTSPEED_HIGH if start_high is None else start_high
+    start_low = DEFAULT_START_FOOTSPEED_LOW if start_low is None else start_low
     g, gfoot = snug_start(left_info, right_info, start_high, start_low)
     if force_snap is not None:
         g = int(np.clip(force_snap, 0, len(left_info.Vm) - 1))

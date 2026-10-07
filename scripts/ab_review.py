@@ -59,8 +59,13 @@ def _worker(args):
     import matplotlib.pyplot as plt                                # noqa: F401
     import brock_functions as bf
     import stride_imu as imu
+    import importlib
     for k, v in parse_switches(args.switches).items():
-        setattr(bf, k, v)
+        # 'NAME' = a brock_functions setting; 'module.NAME' = a stride_imu
+        # one, e.g. inertial.DEFAULT_START_FOOTSPEED_HIGH=0.9
+        mod, _, name = k.rpartition('.')
+        setattr(importlib.import_module(f'stride_imu.{mod}') if mod else bf,
+                name, v)
     feet = bf.load_available_feet(os.path.join(DATA, SESSIONS[args.session]))
     period = next(iter(feet.values())).period
     upgrade = getattr(bf, '_upgrade_columns', lambda d: d)
