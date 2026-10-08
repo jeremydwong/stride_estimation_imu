@@ -1272,3 +1272,42 @@ code changes (user-directed: "do all three").
   inspect_snipped_trial / save_trial_figures / interactive_inspect_trial /
   manual_correct (and via ManualScoring.drag/click **kwargs); notebook G2/G3
   expose NEIGHBOR_S.
+
+### 2026-10-08 — swing threshold 0.9 m/s + end chain + chain-back fix (ADOPTED)
+
+User-directed ("do both"). All three in the shared engine/pipeline:
+- **`DEFAULT_START_FOOTSPEED_HIGH` 1.25 -> 0.9 m/s** (a committed swing).
+  Slow first steps and the closing feet-together step now count. Affects
+  dataset-1 too on next regeneration.
+- **End chain (`END_CHAIN`, automatic bouts):** `snug_end(start=, max_gap=)`
+  groups swings after the gait start into chains (gaps <= CHAIN_GAP_S 0.6 s)
+  and only counts swings up to the end of the LONGEST chain (the main walk).
+  Stops 0.9's run-ons into post-hand-off shuffling (25.1 b2, 46.1 b2, 15.2
+  b1, 25.2 b1, 38.2 b2, 40.2 b2 were +0.7..2.9 s). First version used the
+  chain FROM the start - broke 28.2 b1 (lone initiation step, 0.66 s pause:
+  gait collapsed to 1 step) -> longest chain.
+- **Chain-back fix (Fix B):** `chain_back_start` uses
+  compute_position_two_imus run END_LOOKAHEAD_S past t0 (`_foot_speeds`
+  deleted - it was single-foot compute_position ending AT t0, which read
+  standing as 0.6-0.8 m/s and squashed 12.1 b2's first step to 1.05 m/s).
+  New `floor=` (the onset search floor): when t0 sits within 0.15 s of it,
+  the floor cut a step in progress, so a swing straddling t0 joins the chain
+  (34.1 b1, 20.2 b1 lost 0.3 m without it); elsewhere straddling swings are
+  excluded (allowing them always pulled 16.1 b1, 30.1 b1, 35.2 b1, 43.2 b1
+  2-3 s back onto box handling, 30.1 b1 -1.4 m).
+- **Net vs c7207bd (ab_review `2026-10-08_thr0p9_endchain_chainfix`):** 48/189
+  bouts change: 23 gain the closing step (median +0.38 s, ~+0.06 m), 17
+  starts earlier (12.1 b2, 18.1 b2, 23.1 b2, 28.2 b1 gain a first step),
+  8 ends earlier (post-walk swings after a 0.8-1.2 s pause dropped: 4.2 b1,
+  17.2 b1, 20.1 b2, 30.1 b2, 34.2 b1 ...), 0 run-ons. Hallee's 22 walk-backs:
+  16 unchanged, 6 gained only the closing step (walk-back cuts fire 11x now -
+  the end chain stops most bouts before the turn). Known bad: 4.2 b2 start
+  -2.35 s onto pre-walk shuffling (-0.49 m; Hallee: needs video). 13.2 b2
+  unchanged (not a threshold problem).
+- Tests: EndChainTests (3), ChainBackTests rewritten to fake the engine +
+  floor cases. 41/41.
+- **Figures regenerated** (all 95 trial-rep + 2 omnibus + 2 _viz_manual,
+  Dropbox figures/s07_s08) with this code; 1.25 set stashed in
+  `figures/s07_s08_stash_2026-10-05_threshold1.25/`. Cached auto_aligned CSV
+  NOT rewritten (notebook C regenerates it). The manual worklist report
+  (reports/s07_s08_manual_worklist.*) predates this change - stale.

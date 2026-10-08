@@ -165,6 +165,12 @@ CHAIN_BACK = True
 CHAIN_GAP_S = 0.6
 CHAIN_MAX_S = 3.0
 
+# End chain (2026-10-08, the mirror of Fix B): with the 0.9 m/s swing
+# threshold the slow closing feet-together step counts, but so did shuffles
+# after the hand-off. For an AUTOMATIC bout the gait ends at the last swing
+# of the unbroken chain (gaps <= CHAIN_GAP_S) that starts at the gait start.
+END_CHAIN = True
+
 # The top plot also shows the NEIGHBOURING trials, so you can see which walk
 # you are looking at: NEIGHBOR_S seconds either side of the shown bouts. In
 # s07_s08 the gap from one trial's last Stop to the next trial's first Start
@@ -174,37 +180,39 @@ NEIGHBOR_COLORS = ('#b35806', '#542788', '#1f78b4', '#c51b7d', '#8c510a',
                    '#2166ac')          # cycled by trial number
 
 
-def _foot_speeds(feet, subject, a, b, period):
-    """|V| of both of the subject's feet mechanized over [a, b); None if the
-    window cannot be mechanized (e.g. no stance in it)."""
-    out = {}
-    try:
-        for side in ('left', 'right'):
-            rec = feet[(subject, side)]
-            with contextlib.redirect_stdout(io.StringIO()):
-                out[side] = imu.compute_position(rec.Wb[a:b], rec.Ab[a:b],
-                                                 period).Vm
-    except Exception:
-        return None
-    return out
-
-
-def chain_back_start(feet, subject, i0, t0, period):
+def chain_back_start(feet, subject, i0, t0, period, floor=None):
     """Fix B. Earliest start of an unbroken chain of committed swings that
     runs into the gait start t0 (absolute samples), or None. Swings = runs of
     either foot's speed >= DEFAULT_START_FOOTSPEED_HIGH; consecutive swings
     (and the last one to t0) are <= CHAIN_GAP_S apart; at most CHAIN_MAX_S
-    before t0."""
+    before t0.
+
+    Foot speed comes from compute_position_two_imus (the same engine call
+    as everything else) run END_LOOKAHEAD_S past t0: ZUPT pins velocity
+    only at footfalls, so a run that ENDS at t0 after seconds of standing
+    reads the standing as moving and squashes the first step (12.1 b2: 1.05
+    vs 1.61 m/s with the look-ahead).
+
+    floor: the first sample the onset search could see (absolute). When t0
+    sits at it (<= 0.15 s after), the floor cut a step in progress, so a
+    swing still in progress at t0 also joins the chain; otherwise only
+    swings that end by t0 do (in-progress pre-walk activity elsewhere
+    chained bouts 2-3 s back onto box handling)."""
     a = max(0, min(i0, t0) - int(round((CHAIN_MAX_S + 1.0) / period)))
-    V = _foot_speeds(feet, subject, a, t0 + 1, period)
-    if V is None:
+    lf, rf = feet[(subject, 'left')], feet[(subject, 'right')]
+    b = min(len(lf.Wb), len(rf.Wb), t0 + int(round(END_LOOKAHEAD_S / period)))
+    try:
+        L, R = imu.compute_position_two_imus(lf.Wb[a:b], lf.Ab[a:b],
+                                             rf.Wb[a:b], rf.Ab[a:b], period)
+    except Exception:
         return None
     from stride_imu.inertial import DEFAULT_START_FOOTSPEED_HIGH as hi
-    fast = (V['left'] >= hi) | (V['right'] >= hi)
+    fast = (L.Vm >= hi) | (R.Vm >= hi)
     d = np.diff(np.r_[0, fast.astype(int), 0])
+    at_floor = floor is not None and t0 - floor <= int(round(0.15 / period))
     runs = [(s0 + a, e0 + a) for s0, e0 in zip(np.flatnonzero(d == 1),
                                                np.flatnonzero(d == -1))
-            if e0 + a <= t0]
+            if (s0 + a < t0 if at_floor else e0 + a <= t0)]
     gap, far = int(round(CHAIN_GAP_S / period)), int(round(CHAIN_MAX_S / period))
     start, last = None, t0
     for s0, e0 in reversed(runs):
@@ -380,7 +388,10 @@ def find_straight_gait_window(feet, subject, i0, i1, period, manual=False,
                       imu.compute_position_two_imus(
                           lf.Wb[snip:ext_stop], lf.Ab[snip:ext_stop],
                           rf.Wb[snip:ext_stop], rf.Ab[snip:ext_stop], period))
-            e, end_foot = imu.snug_end(eL, eR, limit=stop - 1 - snip)
+            e, end_foot = imu.snug_end(
+                eL, eR, limit=stop - 1 - snip, start=start - snip,
+                max_gap=(int(round(CHAIN_GAP_S / period))
+                         if END_CHAIN and automatic else None))
             if e is not None and snip + 2 <= snip + e + 1 < stop:
                 end = snip + e
         return {'snip': snip, 'onset': onset, 'start': start, 'end': end,
@@ -418,7 +429,8 @@ def find_straight_gait_window(feet, subject, i0, i1, period, manual=False,
     search_from, chain = i0, 0.0
     if CHAIN_BACK and automatic:
         w0 = decide(i1, i0)
-        cs = chain_back_start(feet, subject, i0, w0['start'], period)
+        cs = chain_back_start(feet, subject, i0, w0['start'], period,
+                              floor=w0['snip'])
         if cs is not None and cs < w0['start']:
             s2 = max(0, cs - int(round(0.1 / period)))
             w2 = decide(i1, s2)

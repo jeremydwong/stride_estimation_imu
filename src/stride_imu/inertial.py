@@ -8,7 +8,8 @@ GRAVITY = 9.80297286843
 # Default foot-speed thresholds for snug_start (m/s): the first step of a bout is
 # snugged to the velocity valley before the first swing that crosses *_HIGH,
 # stopping at a local minimum or when |V| falls to *_LOW.
-DEFAULT_START_FOOTSPEED_HIGH = 1.25
+DEFAULT_START_FOOTSPEED_HIGH = 0.9   # a "committed swing" (was 1.25 until
+                                     # 2026-10-08: missed slow first/closing steps)
 DEFAULT_START_FOOTSPEED_LOW = 0.2
 
 
@@ -1411,7 +1412,8 @@ def snug_start(left_info: 'FootTrajectory', right_info: 'FootTrajectory',
 def snug_end(left_info: 'FootTrajectory', right_info: 'FootTrajectory',
              high: Optional[float] = None,
              low: Optional[float] = None,
-             limit: Optional[int] = None) -> Tuple[Optional[int], Optional[str]]:
+             limit: Optional[int] = None, start: Optional[int] = None,
+             max_gap: Optional[int] = None) -> Tuple[Optional[int], Optional[str]]:
     """Reverse of snug_start: last committed swing, then its settling valley.
 
     Returns an inclusive sample index and foot, or (None, None) when neither
@@ -1425,6 +1427,13 @@ def snug_end(left_info: 'FootTrajectory', right_info: 'FootTrajectory',
     settling valley is at/before `limit` count - i.e. the gait ends at the
     last landing COMPLETED inside the window. None = the historic rule on the
     whole trajectory.
+
+    start, max_gap (samples; with limit): swings after the gait start are
+    grouped into CHAINS - committed swings (either foot >= high) each
+    starting within max_gap of the previous one ending - and only swings up
+    to the end of the LONGEST chain (the main walk) count, so shuffles after
+    a pause (the hand-off) do not extend the gait, and a pause after a lone
+    first step does not end it. None = no chain rule.
     """
     high = DEFAULT_START_FOOTSPEED_HIGH if high is None else high
     low = DEFAULT_START_FOOTSPEED_LOW if low is None else low
@@ -1448,6 +1457,22 @@ def snug_end(left_info: 'FootTrajectory', right_info: 'FootTrajectory',
         i, foot = last
         return settle(left_info.Vm if foot == 'left' else right_info.Vm, i), foot
 
+    chain_end = np.inf
+    if start is not None and max_gap is not None:
+        fast = (left_info.Vm >= high) | (right_info.Vm >= high)
+        d = np.diff(np.r_[0, fast.astype(int), 0])
+        runs = [(s0, e0 - 1) for s0, e0 in zip(np.flatnonzero(d == 1),
+                                               np.flatnonzero(d == -1))
+                if e0 - 1 >= start]
+        chains = []                       # [first sample, last sample]
+        for s0, e0 in runs:
+            if chains and s0 - chains[-1][1] <= max_gap:
+                chains[-1][1] = e0
+            else:
+                chains.append([s0, e0])
+        if chains:    # the MAIN walk = the longest chain (a pre-walk step
+            chain_end = max(chains, key=lambda c: c[1] - c[0])[1]  # or a
+            # pause after the first step does not end the gait there)
     best = None
     for foot, speed in speeds:
         hi = np.flatnonzero(speed >= high)
@@ -1457,7 +1482,7 @@ def snug_end(left_info: 'FootTrajectory', right_info: 'FootTrajectory',
         # the run's last sample. Latest landing inside the window wins.
         run_ends = hi[np.r_[np.diff(hi) > 1, True]]
         for end in run_ends[::-1]:
-            if end > limit:
+            if end > limit or end > chain_end:
                 continue
             v = settle(speed, int(end))
             if v <= limit:
